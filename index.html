@@ -131,11 +131,13 @@ canvas{position:absolute;left:0;top:0}
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
   <linearGradient id="gBody" x1="0" x2="1"><stop offset="0" stop-color="#dcdce3"/><stop offset=".3" stop-color="#fff"/><stop offset=".7" stop-color="#f5f5f8"/><stop offset="1" stop-color="#cfcfd8"/></linearGradient>
   <linearGradient id="gWood" x1="0" x2="1"><stop offset="0" stop-color="#d4a870"/><stop offset=".4" stop-color="#f4d9ac"/><stop offset="1" stop-color="#c99a5f"/></linearGradient>
+  <linearGradient id="gNib" x1="0" x2="1"><stop offset="0" stop-color="#a7a7b0"/><stop offset=".45" stop-color="#f6f6f8"/><stop offset="1" stop-color="#9a9aa3"/></linearGradient>
   <linearGradient id="gShade" x1="0" x2="1"><stop offset="0" stop-color="#000" stop-opacity=".2"/><stop offset=".35" stop-color="#fff" stop-opacity=".28"/><stop offset="1" stop-color="#000" stop-opacity=".25"/></linearGradient>
 </defs></svg>
 
 <div id="board">
   <div id="grid" hidden></div>
+  <canvas id="fills"></canvas>
   <canvas id="main"></canvas>
   <canvas id="live"></canvas>
 
@@ -184,8 +186,9 @@ canvas{position:absolute;left:0;top:0}
 (() => {
 'use strict';
 const $ = s => document.querySelector(s);
-const boardEl = $('#board'), gridEl = $('#grid'), main = $('#main'), live = $('#live');
+const boardEl = $('#board'), gridEl = $('#grid'), main = $('#main'), live = $('#live'), fillsEl = $('#fills');
 const ctx = main.getContext('2d');
+const fctx = fillsEl.getContext('2d');          // fills live on their own layer, under the ink
 const lctx = live.getContext('2d', { desynchronized: true });
 const snap = document.createElement('canvas'), sctx = snap.getContext('2d');
 const MINS = 0.1, MAXS = 8;
@@ -204,18 +207,22 @@ const PRESETS = ['#000000', '#007AFF', '#34C759', '#FFCC00', '#FF3B30'];
 const TOOLS = {
   pen:      { kind: 'fill', widths: [1, 2, 3.5, 6, 10],   curve: p => 0.35 + 0.95 * p },
   monoline: { kind: 'line', widths: [1, 2, 3.5, 6, 10] },
+  fountain: { kind: 'fill', widths: [2, 3.5, 5.5, 8, 12],  curve: p => 0.5 + 0.8 * p, nib: true },
   marker:   { kind: 'line', widths: [8, 14, 20, 30, 44],  alpha: 0.5, blend: 'multiply' },
   pencil:   { kind: 'fill', widths: [1.5, 2.5, 4, 7, 12], curve: p => 0.55 + 0.7 * p, alpha: 0.92, texture: 'pencil' },
   crayon:   { kind: 'fill', widths: [6, 10, 16, 24, 34],  curve: p => 0.8 + 0.4 * p, texture: 'crayon' },
+  fill:     { kind: 'area' },
   eraser:   { kind: 'erase', widths: [8, 16, 30, 50, 80] },
 };
-const ORDER = ['pen', 'monoline', 'marker', 'pencil', 'crayon', 'eraser'];
+const ORDER = ['pen', 'monoline', 'fountain', 'marker', 'pencil', 'crayon', 'fill', 'eraser'];
 let prefs = {
   tool: 'pen', lastDraw: 'pen', grid: false, finger: false,
   t: {
     pen: { color: '#000000', wi: 1, op: 1 }, monoline: { color: '#007AFF', wi: 1, op: 1 },
+    fountain: { color: '#000000', wi: 1, op: 1 },
     marker: { color: '#FFCC00', wi: 2, op: 1 }, pencil: { color: '#000000', wi: 1, op: 1 },
-    crayon: { color: '#FF3B30', wi: 2, op: 1 }, eraser: { wi: 2, mode: 'pixel' },
+    crayon: { color: '#FF3B30', wi: 2, op: 1 }, fill: { color: '#007AFF', wi: 0, op: 1 },
+    eraser: { wi: 2, mode: 'pixel' },
   },
 };
 
@@ -225,6 +232,8 @@ const TOOL_SVG = {
   marker: `<rect x="6" y="42" width="18" height="52" rx="1.5" fill="url(#gBody)"/><path d="M6.5 42 9.5 27h11l3 15Z" fill="url(#gBody)"/><path d="M10.5 27 11.5 13.5l8 4.5V27Z" fill="var(--c)"/><rect x="6" y="48" width="18" height="5" fill="var(--c)"/>`,
   pencil: `<rect x="8" y="40" width="14" height="54" fill="var(--c)"/><rect x="8" y="40" width="14" height="54" fill="url(#gShade)"/><path d="M8 40 15 10l7 30Z" fill="url(#gWood)"/><path d="M12.7 20 15 10l2.3 10Z" fill="var(--c)"/>`,
   crayon: `<rect x="8" y="38" width="14" height="56" fill="var(--c)"/><path d="M8.5 38 11.5 22Q15 16 18.5 22l3 16Z" fill="var(--c)"/><rect x="8" y="50" width="14" height="32" fill="#fff" fill-opacity=".88"/><rect x="8" y="54" width="14" height="1.6" fill="var(--c)"/><rect x="8" y="77" width="14" height="1.6" fill="var(--c)"/><rect x="8" y="38" width="14" height="56" fill="url(#gShade)"/>`,
+  fountain: `<rect x="8" y="42" width="14" height="52" fill="url(#gBody)"/><path d="M9.5 42 15 9l5.5 33Z" fill="url(#gNib)"/><path d="M15 15v16" stroke="#77777e" stroke-width=".9"/><circle cx="15" cy="31.5" r="1.5" fill="#77777e"/><path d="M14 13.6 15 9l1 4.6Z" fill="var(--c)"/><rect x="8" y="48" width="14" height="5" fill="var(--c)"/>`,
+  fill: `<rect x="9" y="50" width="12" height="44" fill="url(#gBody)"/><path d="M6 21h18l-2.2 26.5q-.3 2.5-2.8 2.5h-8q-2.5 0-2.8-2.5Z" fill="url(#gBody)"/><path d="M6.4 21q8.6-15 17.2 0" fill="none" stroke="#8e8e93" stroke-width="1.4"/><ellipse cx="15" cy="21" rx="9" ry="3" fill="var(--c)"/><path d="M6.2 21.5q-1.2 7 1.4 10.5 1.6 1.8 1.8-1.2l.2-8.3Z" fill="var(--c)"/>`,
   eraser: `<path d="M7 94V32q0-8 8-8t8 8v62Z" fill="url(#gBody)"/><path d="M7 41V32q0-8 8-8t8 8v9Z" fill="#f6b6c2"/><rect x="7" y="41" width="16" height="1.5" fill="#cfcfd8"/>`,
 };
 
@@ -253,7 +262,7 @@ function op(store, mode, fn) {
     t.onerror = t.onabort = () => rej(t.error);
   });
 }
-const plainStroke = s => ({ id: s.id, board: s.board, seq: s.seq, tool: s.tool, color: s.color, width: s.width, opacity: s.opacity, pts: s.pts, bbox: s.bbox });
+const plainStroke = s => ({ ...s });
 const store = {
   kvGet: k => db ? op('kv', 'readonly', s => s.get(k)) : Promise.resolve(mem.kv.get(k)),
   kvSet: (k, val) => db ? op('kv', 'readwrite', s => s.put(val, k)) : (mem.kv.set(k, val), Promise.resolve()),
@@ -277,7 +286,13 @@ const saveErr = e => { console.error(e); toast('Couldn’t save — storage prob
 
 /* ---------------- geometry / paths ---------------- */
 function buildPath(s) {
-  const P = s.pts, n = P.length / 3, T = TOOLS[s.tool], path = new Path2D();
+  const T = TOOLS[s.tool], path = new Path2D();
+  if (T.kind === 'area') {                // paint-bucket fill: horizontal runs of the filled region
+    const Rw = s.rows, res = s.res, hh = res * 1.06;
+    for (let i = 0; i < Rw.length; i += 3) path.rect(s.ox + Rw[i + 1] * res, s.oy + Rw[i] * res, Rw[i + 2] * res, hh);
+    return path;
+  }
+  const P = s.pts, n = P.length / 3;
   if (T.kind === 'erase') {               // straight segments, matches live erasing exactly
     path.moveTo(P[0], P[1]);
     if (n === 1) path.lineTo(P[0] + 0.01, P[1]);
@@ -298,7 +313,13 @@ function buildPath(s) {
   const r = new Float32Array(n);
   let prev = -1;
   for (let i = 0; i < n; i++) {
-    const w = s.width * T.curve(P[i * 3 + 2]) / 2;
+    let f = T.curve(P[i * 3 + 2]);
+    if (T.nib) {                          // fountain pen: a 45° nib is thin along "/" and thick across it
+      const a = i > 0 ? i - 1 : 0, b = i < n - 1 ? i + 1 : n - 1;
+      const dx = P[b * 3] - P[a * 3], dy = P[b * 3 + 1] - P[a * 3 + 1];
+      if (dx || dy) f *= 0.2 + 0.8 * Math.abs(Math.sin(Math.atan2(dy, dx) + Math.PI / 4));
+    }
+    const w = s.width * f / 2;
     prev = prev < 0 ? w : prev + (w - prev) * 0.3;
     r[i] = Math.max(prev, 0.25);
   }
@@ -329,7 +350,16 @@ function getPath(s) {
   return p;
 }
 function calcBBox(s) {
-  const P = s.pts, T = TOOLS[s.tool];
+  const T = TOOLS[s.tool];
+  if (T.kind === 'area') {
+    const R = s.rows; let r0 = Infinity, r1 = -Infinity, c0 = Infinity, c1 = -Infinity;
+    for (let i = 0; i < R.length; i += 3) {
+      if (R[i] < r0) r0 = R[i]; if (R[i] > r1) r1 = R[i];
+      if (R[i + 1] < c0) c0 = R[i + 1]; if (R[i + 1] + R[i + 2] > c1) c1 = R[i + 1] + R[i + 2];
+    }
+    return [s.ox + c0 * s.res, s.oy + r0 * s.res, s.ox + c1 * s.res, s.oy + (r1 + 1.06) * s.res];
+  }
+  const P = s.pts;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (let i = 0; i < P.length; i += 3) {
     const x = P[i], y = P[i + 1];
@@ -373,6 +403,9 @@ function drawStroke(c, s, path) {
     c.globalCompositeOperation = 'destination-out'; c.globalAlpha = 1;
     c.lineCap = c.lineJoin = 'round'; c.lineWidth = s.width; c.strokeStyle = '#000';
     c.stroke(path);
+  } else if (T.kind === 'area') {
+    c.globalAlpha = s.opacity ?? 1; c.fillStyle = s.color;
+    c.fill(path);
   } else {
     c.globalAlpha = s.opacity * (T.alpha || 1);
     c.globalCompositeOperation = T.blend || 'source-over';
@@ -394,28 +427,37 @@ const toWorld = (x, y) => [(x - v.x) / v.s, (y - v.y) / v.s];
 function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 2);
   W = Math.round(innerWidth * DPR); H = Math.round(innerHeight * DPR);
-  for (const c of [main, live]) { c.width = W; c.height = H; c.style.width = innerWidth + 'px'; c.style.height = innerHeight + 'px'; }
+  for (const c of [fillsEl, main, live]) { c.width = W; c.height = H; c.style.width = innerWidth + 'px'; c.style.height = innerHeight + 'px'; }
   snap.width = W; snap.height = H;
   render(); updateGrid();
 }
 function render() {
   const t0 = performance.now();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
-  ctx.clearRect(0, 0, W, H);
-  setView(ctx);
+  for (const c of [fctx, ctx]) {
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1;
+    c.clearRect(0, 0, W, H);
+    setView(c);
+  }
   const x0 = -v.x / v.s, y0 = -v.y / v.s, x1 = x0 + innerWidth / v.s, y1 = y0 + innerHeight / v.s, tiny = 0.4 / v.s;
+  let anyFill = false;
   for (const s of strokes) {
     const b = s.bbox;
     if (b[2] < x0 || b[0] > x1 || b[3] < y0 || b[1] > y1) continue;
     if (b[2] - b[0] < tiny && b[3] - b[1] < tiny) continue;
+    if (s.tool === 'fill') { drawStroke(fctx, s, getPath(s)); anyFill = true; continue; }
+    if (s.tool === 'eraser' && anyFill) drawStroke(fctx, s, getPath(s));   // erasers also rub out older fills
     drawStroke(ctx, s, getPath(s));
   }
-  if (pen && pen.tool === 'eraser' && pen.mode === 'pixel' && pen.pts.length) drawStroke(ctx, pen.stroke, buildPath(pen.stroke));
+  if (pen && pen.tool === 'eraser' && pen.mode === 'pixel' && pen.pts.length) {
+    const p = buildPath(pen.stroke);
+    drawStroke(ctx, pen.stroke, p); drawStroke(fctx, pen.stroke, p);
+  }
   lastRenderMs = performance.now() - t0;
 }
 function drawSnap() {
   const k = v.s / snapView.s;
+  fctx.setTransform(1, 0, 0, 1, 0, 0); fctx.clearRect(0, 0, W, H);
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, H);
   ctx.setTransform(k, 0, 0, k, DPR * (v.x - snapView.x * k), DPR * (v.y - snapView.y * k));
   ctx.drawImage(snap, 0, 0);
@@ -435,13 +477,23 @@ function drawLive() {
   setView(lctx);
   drawStroke(lctx, pen.stroke, buildPath(pen.stroke));
 }
+let gridMode = null;
 function updateGrid() {
-  gridEl.hidden = !prefs.grid;
-  if (!prefs.grid) return;
-  let g = 40 * v.s;
-  while (g < 18) g *= 5;
+  const mode = prefs.grid;
+  gridEl.hidden = !mode;
+  if (!mode) return;
+  const dots = mode === 'dots';
+  if (gridMode !== mode) {
+    gridMode = mode;
+    gridEl.style.backgroundImage = dots
+      ? 'radial-gradient(circle, rgba(60,60,67,.32) 1.25px, transparent 1.75px)'
+      : 'linear-gradient(to right,rgba(0,0,0,.07) 1px,transparent 1px),linear-gradient(to bottom,rgba(0,0,0,.07) 1px,transparent 1px)';
+  }
+  let g = (dots ? 28 : 40) * v.s;
+  while (g < (dots ? 14 : 18)) g *= dots ? 4 : 5;
+  const ox = v.x % g, oy = v.y % g;
   gridEl.style.backgroundSize = `${g}px ${g}px`;
-  gridEl.style.backgroundPosition = `${v.x % g}px ${v.y % g}px`;
+  gridEl.style.backgroundPosition = dots ? `${ox - g / 2}px ${oy - g / 2}px` : `${ox}px ${oy}px`;
 }
 
 let needMain = false, needLive = false, raf = 0;
@@ -457,7 +509,7 @@ function beginGesture() {
   if (gesturing) return;
   gesturing = true;
   useSnap = lastRenderMs > 16;          // heavy board: move a snapshot while fingers are down
-  if (useSnap) { sctx.setTransform(1, 0, 0, 1, 0, 0); sctx.clearRect(0, 0, W, H); sctx.drawImage(main, 0, 0); snapView = { ...v }; }
+  if (useSnap) { sctx.setTransform(1, 0, 0, 1, 0, 0); sctx.clearRect(0, 0, W, H); sctx.drawImage(fillsEl, 0, 0); sctx.drawImage(main, 0, 0); snapView = { ...v }; }
 }
 function endGesture() {
   if (!gesturing) return;
@@ -486,11 +538,13 @@ function addPoint(ev) {
   P.push(wx, wy, p);
   if (pen.tool === 'eraser') {
     if (pen.mode === 'pixel') {
-      setView(ctx);
-      ctx.globalCompositeOperation = 'destination-out';
-      ctx.lineCap = ctx.lineJoin = 'round'; ctx.lineWidth = pen.stroke.width;
-      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(n ? wx : wx + 0.01, wy); ctx.stroke();
-      ctx.globalCompositeOperation = 'source-over';
+      for (const c of [ctx, fctx]) {
+        setView(c);
+        c.globalCompositeOperation = 'destination-out';
+        c.lineCap = c.lineJoin = 'round'; c.lineWidth = pen.stroke.width;
+        c.beginPath(); c.moveTo(px, py); c.lineTo(n ? wx : wx + 0.01, wy); c.stroke();
+        c.globalCompositeOperation = 'source-over';
+      }
     } else sweepErase(px, py, wx, wy);
   }
   requestLive();
@@ -509,14 +563,107 @@ function sweepErase(x0, y0, x1, y1) {
     for (let i = strokes.length - 1; i >= 0; i--) {
       const s = strokes[i], b = s.bbox;
       if (s.tool === 'eraser' || x < b[0] - r || x > b[2] + r || y < b[1] - r || y > b[3] + r) continue;
-      const P = s.pts, tol = r + s.width * 0.6;
-      let near = P.length === 3 && Math.hypot(x - P[0], y - P[1]) <= tol;
-      for (let j = 3; !near && j < P.length; j += 3) near = distSeg(x, y, P[j - 3], P[j - 2], P[j], P[j + 1]) <= tol;
+      let near = false;
+      if (s.tool === 'fill') near = insideFill(s, x, y);
+      else {
+        const P = s.pts, tol = r + s.width * 0.6;
+        near = P.length === 3 && Math.hypot(x - P[0], y - P[1]) <= tol;
+        for (let j = 3; !near && j < P.length; j += 3) near = distSeg(x, y, P[j - 3], P[j - 2], P[j], P[j + 1]) <= tol;
+      }
       if (near) { pen.removed.push(s); strokes.splice(i, 1); hit = true; }
     }
   }
   if (hit) requestRender();
 }
+function insideFill(s, x, y) {
+  const row = Math.floor((y - s.oy) / s.res), col = (x - s.ox) / s.res, R = s.rows;
+  for (let i = 0; i < R.length; i += 3) if (R[i] === row && col >= R[i + 1] && col <= R[i + 1] + R[i + 2]) return true;
+  return false;
+}
+
+/* paint bucket: flood the closed area under the tap (screen-sized mask, small gaps closed) */
+const maskC = document.createElement('canvas');
+function doFill(cx, cy) {
+  const st = prefs.t.fill;
+  maskC.width = W; maskC.height = H;
+  const g = maskC.getContext('2d', { willReadFrequently: true });
+  const k = DPR * v.s, gap = Math.max(2, Math.round(2.5 * DPR)), grow = gap / k;
+  g.setTransform(k, 0, 0, k, DPR * v.x, DPR * v.y);
+  g.lineCap = g.lineJoin = 'round'; g.fillStyle = g.strokeStyle = '#000';
+  const x0 = -v.x / v.s - grow, y0 = -v.y / v.s - grow, x1 = x0 + innerWidth / v.s + 2 * grow, y1 = y0 + innerHeight / v.s + 2 * grow;
+  for (const s of strokes) {
+    const b = s.bbox;
+    if (s.tool === 'fill' || b[2] < x0 || b[0] > x1 || b[3] < y0 || b[1] > y1) continue;
+    const T = TOOLS[s.tool], p = getPath(s);
+    if (T.kind === 'erase') { g.globalCompositeOperation = 'destination-out'; g.lineWidth = s.width; g.stroke(p); g.globalCompositeOperation = 'source-over'; }
+    else if (T.kind === 'line') { g.lineWidth = s.width + 2 * grow; g.stroke(p); }
+    else { g.fill(p); g.lineWidth = 2 * grow; g.stroke(p); }
+  }
+  const data = g.getImageData(0, 0, W, H).data;
+  maskC.width = maskC.height = 1;
+  const N = W * H, bar = new Uint8Array(N);
+  for (let i = 0, j = 3; i < N; i++, j += 4) bar[i] = data[j] > 40 ? 1 : 0;
+  const sx = clamp(Math.round(cx * DPR), 0, W - 1), sy = clamp(Math.round(cy * DPR), 0, H - 1);
+  if (bar[sy * W + sx]) { toast('Tap inside a closed shape'); return; }
+  const out = new Uint8Array(N), stack = [sx, sy];
+  let minX = W, maxX = 0, minY = H, maxY = 0;
+  while (stack.length) {
+    const y = stack.pop(), x = stack.pop(), row = y * W;
+    if (out[row + x] || bar[row + x]) continue;
+    let l = x, r = x;
+    while (l > 0 && !bar[row + l - 1] && !out[row + l - 1]) l--;
+    while (r < W - 1 && !bar[row + r + 1] && !out[row + r + 1]) r++;
+    if (l === 0 || r === W - 1 || y === 0 || y === H - 1) { toast('That shape isn’t closed — or zoom out to see all of it'); return; }
+    for (let i = l; i <= r; i++) out[row + i] = 1;
+    if (l < minX) minX = l; if (r > maxX) maxX = r; if (y < minY) minY = y; if (y > maxY) maxY = y;
+    for (const ny of [y - 1, y + 1]) {
+      const nrow = ny * W; let run = false;
+      for (let i = l; i <= r; i++) {
+        const free = !bar[nrow + i] && !out[nrow + i];
+        if (free && !run) stack.push(i, ny);
+        run = free;
+      }
+    }
+  }
+  // grow the fill so it tucks under the outline (no white halo)
+  const rad = gap + 1;
+  const bx0 = Math.max(0, minX - rad), bx1 = Math.min(W - 1, maxX + rad), by0 = Math.max(0, minY - rad), by1 = Math.min(H - 1, maxY + rad);
+  const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1, tmp = new Uint8Array(bw * bh), m = new Uint8Array(bw * bh);
+  for (let y = 0; y < bh; y++) {
+    const src = (y + by0) * W + bx0; let cnt = 0;
+    for (let x = -rad; x < bw; x++) {
+      if (x + rad < bw && out[src + x + rad]) cnt++;
+      if (x - rad - 1 >= 0 && out[src + x - rad - 1]) cnt--;
+      if (x >= 0) tmp[y * bw + x] = cnt > 0;
+    }
+  }
+  for (let x = 0; x < bw; x++) {
+    let cnt = 0;
+    for (let y = -rad; y < bh; y++) {
+      if (y + rad < bh && tmp[(y + rad) * bw + x]) cnt++;
+      if (y - rad - 1 >= 0 && tmp[(y - rad - 1) * bw + x]) cnt--;
+      if (y >= 0) m[y * bw + x] = cnt > 0;
+    }
+  }
+  const rows = [];
+  for (let y = 0; y < bh; y++) {
+    const o = y * bw; let x = 0;
+    while (x < bw) {
+      if (!m[o + x]) { x++; continue; }
+      let e = x; while (e < bw && m[o + e]) e++;
+      rows.push(y, x, e - x); x = e;
+    }
+  }
+  const s = { id: uid(), board: board.id, seq: nextSeq++, tool: 'fill', color: st.color, opacity: st.op ?? 1, width: 0,
+    ox: (bx0 / DPR - v.x) / v.s, oy: (by0 / DPR - v.y) / v.s, res: 1 / k, rows: Uint16Array.from(rows) };
+  s.bbox = calcBBox(s);
+  strokes.push(s);
+  setView(fctx); drawStroke(fctx, s, getPath(s));
+  store.putStrokes([s]).catch(saveErr);
+  pushOp({ type: 'add', strokes: [s] });
+  touchBoard();
+}
+
 function finishStroke() {
   const p = pen; pen = null;
   live.style.mixBlendMode = 'normal';
@@ -587,6 +734,7 @@ function onDown(e) {
     if (pen) return;
     if (touches.size) { for (const id of touches.keys()) ignored.add(id); touches.clear(); tap = null; g = null; }
     endGesture();
+    if (prefs.tool === 'fill') { doFill(e.clientX, e.clientY); return; }
     startStroke(e, e.pointerType);
     return;
   }
@@ -600,7 +748,7 @@ function onDown(e) {
   if (!touches.size && !tap) tap = { t: performance.now(), max: 0, moved: 0 };
   touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (tap) tap.max = Math.max(tap.max, touches.size);
-  if (prefs.finger && touches.size === 1) { touches.delete(e.pointerId); startStroke(e, 'touch'); return; }
+  if (prefs.finger && touches.size === 1 && prefs.tool !== 'fill') { touches.delete(e.pointerId); startStroke(e, 'touch'); return; }
   baseline();
 }
 function onMove(e) {
@@ -625,6 +773,7 @@ function onUp(e) {
   if (tap && e.type === 'pointerup' && performance.now() - tap.t < 350 && tap.moved < 24) {
     if (tap.max === 2 && undo()) toast('Undo');
     else if (tap.max === 3 && redo()) toast('Redo');
+    else if (tap.max === 1 && prefs.tool === 'fill' && tap.moved < 10) doFill(e.clientX, e.clientY);
   }
   tap = null;
 }
@@ -758,7 +907,7 @@ function openToolOptions(btn) {
         <button class="mi" data-mode="object"><span>Object Eraser</span><span class="chk">${st.mode === 'object' ? '✓' : ''}</span></button>
         ${st.mode === 'pixel' ? '<div style="border-top:.5px solid var(--sep)">' + widths() + '</div>' : ''}`;
     } else {
-      node.innerHTML = widths() + `<div class="op"><input type="range" min="10" max="100" step="1" value="${Math.round((st.op ?? 1) * 100)}"><span>${Math.round((st.op ?? 1) * 100)}%</span></div>`;
+      node.innerHTML = (T.widths ? widths() : `<div class="pophead" style="margin:0"><span>Fill</span></div><p style="margin:4px 0 0;font-size:13px;color:var(--label2)">Tap inside a closed shape to color it in.</p>`) + `<div class="op"><input type="range" min="10" max="100" step="1" value="${Math.round((st.op ?? 1) * 100)}"><span>${Math.round((st.op ?? 1) * 100)}%</span></div>`;
       const r = node.querySelector('input');
       r.addEventListener('input', () => { st.op = r.value / 100; node.querySelector('.op span').textContent = r.value + '%'; });
       r.addEventListener('change', savePrefs);
@@ -825,7 +974,8 @@ $('#bBack').addEventListener('click', showGallery);
 $('#bMore').addEventListener('click', e => menu([
   { label: 'Zoom to Fit', action: zoomToFit },
   { label: 'Actual Size (100%)', action: actualSize },
-  { label: 'Show Grid', check: prefs.grid, gap: true, action: () => { prefs.grid = !prefs.grid; updateGrid(); savePrefs(); } },
+  { label: 'Dot Grid', check: prefs.grid === 'dots', gap: true, action: () => { prefs.grid = prefs.grid === 'dots' ? false : 'dots'; updateGrid(); savePrefs(); } },
+  { label: 'Line Grid', check: prefs.grid === 'lines', action: () => { prefs.grid = prefs.grid === 'lines' ? false : 'lines'; updateGrid(); savePrefs(); } },
   { label: 'Draw with Finger', check: prefs.finger, action: () => { prefs.finger = !prefs.finger; savePrefs(); toast(prefs.finger ? 'One finger draws' : 'One finger moves the board'); } },
   { label: 'Export Image…', gap: true, action: exportImage },
   { label: 'Back Up Board…', action: backupBoard },
@@ -911,10 +1061,22 @@ $('#bNew').addEventListener('click', async () => { const b = await createBoard('
 
 /* ---------------- export / backup ---------------- */
 function paintAll(c, scale, ox, oy, w, h) {
+  let fc = null;
+  if (strokes.some(s => s.tool === 'fill')) {
+    const f = document.createElement('canvas'); f.width = w; f.height = h;
+    fc = f.getContext('2d'); fc.setTransform(scale, 0, 0, scale, ox, oy);
+  }
   c.setTransform(scale, 0, 0, scale, ox, oy);
-  for (const s of strokes) drawStroke(c, s, getPath(s));
+  let anyFill = false;
+  for (const s of strokes) {
+    if (s.tool === 'fill') { drawStroke(fc, s, getPath(s)); anyFill = true; continue; }
+    if (s.tool === 'eraser' && anyFill) drawStroke(fc, s, getPath(s));
+    drawStroke(c, s, getPath(s));
+  }
   c.setTransform(1, 0, 0, 1, 0, 0);
-  c.globalCompositeOperation = 'destination-over'; c.fillStyle = '#fff'; c.fillRect(0, 0, w, h);
+  c.globalCompositeOperation = 'destination-over';
+  if (fc) c.drawImage(fc.canvas, 0, 0);
+  c.fillStyle = '#fff'; c.fillRect(0, 0, w, h);
   c.globalCompositeOperation = 'source-over';
 }
 function makeThumb() {
@@ -945,7 +1107,9 @@ function backupBoard() {
   const data = {
     app: 'easyform', version: 1,
     board: { title: board.title, created: board.created, updated: board.updated, view: { ...v } },
-    strokes: strokes.map(s => ({ seq: s.seq, tool: s.tool, color: s.color, width: s.width, opacity: s.opacity, pts: Array.from(s.pts, r2) })),
+    strokes: strokes.map(s => s.tool === 'fill'
+      ? { seq: s.seq, tool: s.tool, color: s.color, opacity: s.opacity, ox: s.ox, oy: s.oy, res: s.res, rows: Array.from(s.rows) }
+      : { seq: s.seq, tool: s.tool, color: s.color, width: s.width, opacity: s.opacity, pts: Array.from(s.pts, r2) }),
   };
   const file = new File([JSON.stringify(data)], safeName(board.title) + ' backup.json', { type: 'application/json' });
   offerFile(file, 'Backup Ready', null);
@@ -959,8 +1123,11 @@ $('#fileIn').addEventListener('change', async e => {
     const b = await createBoard(String(data.board?.title || 'Restored Board').slice(0, 60));
     b.view = data.board?.view || b.view; b.created = data.board?.created || b.created;
     await store.putBoard(b);
-    const list = data.strokes.filter(s => TOOLS[s.tool] && Array.isArray(s.pts) && s.pts.length >= 3).map((s, i) => {
-      const x = { id: uid(), board: b.id, seq: s.seq ?? i + 1, tool: s.tool, color: String(s.color || '#000000'), width: +s.width || 2, opacity: s.opacity ?? 1, pts: new Float32Array(s.pts) };
+    const isFill = s => s.tool === 'fill' && Array.isArray(s.rows) && s.rows.length >= 3 && s.res > 0;
+    const list = data.strokes.filter(s => TOOLS[s.tool] && (isFill(s) || (s.tool !== 'fill' && Array.isArray(s.pts) && s.pts.length >= 3))).map((s, i) => {
+      const x = { id: uid(), board: b.id, seq: s.seq ?? i + 1, tool: s.tool, color: String(s.color || '#000000'), opacity: s.opacity ?? 1 };
+      if (s.tool === 'fill') Object.assign(x, { width: 0, ox: +s.ox || 0, oy: +s.oy || 0, res: +s.res, rows: Uint16Array.from(s.rows) });
+      else Object.assign(x, { width: +s.width || 2, pts: new Float32Array(s.pts) });
       x.bbox = calcBBox(x); return x;
     });
     await store.putStrokes(list);
@@ -998,7 +1165,7 @@ async function init() {
   try { db = await openDB(); } catch (e) { db = null; console.warn('IndexedDB unavailable', e); }
   try {
     const p = await store.kvGet('prefs');
-    if (p && p.t) { prefs = { ...prefs, ...p, t: { ...prefs.t, ...p.t } }; if (!TOOLS[prefs.tool]) prefs.tool = 'pen'; }
+    if (p && p.t) { prefs = { ...prefs, ...p, t: { ...prefs.t, ...p.t } }; if (!TOOLS[prefs.tool]) prefs.tool = 'pen'; if (prefs.grid === true) prefs.grid = 'lines'; }
   } catch (_) {}
   buildPalette();
   let b = null;
