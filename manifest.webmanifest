@@ -1,6 +1,6 @@
 {
-  "name": "Easyform",
-  "short_name": "Easyform",
+  "name": "EzDraw",
+  "short_name": "EzDraw",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

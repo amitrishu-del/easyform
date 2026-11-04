@@ -6,13 +6,13 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Easyform">
+<meta name="apple-mobile-web-app-title" content="EzDraw">
 <meta name="theme-color" content="#ffffff">
 <meta name="color-scheme" content="light">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon-180.png">
 <link rel="manifest" href="manifest.webmanifest">
-<title>Easyform</title>
+<title>EzDraw</title>
 <style>
 :root{
   color-scheme:light;
@@ -261,7 +261,7 @@ const TOOLS = {
   stamp:    { kind: 'stamp', widths: [32, 48, 72, 104, 150], nocolor: true },
   eraser:   { kind: 'erase', widths: [8, 16, 30, 50, 80] },
 };
-const ORDER = ['pen', 'monoline', 'fountain', 'marker', 'pencil', 'crayon', 'glitter', 'rainbow', 'fill', 'stamp', 'eraser'];
+const ORDER = ['pen', 'monoline', 'fountain', 'marker', 'pencil', 'crayon', 'glitter', 'rainbow', 'fill', 'eraser'];   // stamps hidden for now (old ones still show)
 const STAMPS = ['⭐️', '❤️', '🌈', '☀️', '🌙', '☁️', '🌸', '🌻', '🌳', '🍎', '🍓', '🎈', '🐶', '🐱', '🐰', '🦄', '🐻', '🐟', '🦋', '🐞', '🦖', '🚗', '🚀', '🏠'];
 let prefs = {
   tool: 'pen', lastDraw: 'pen', grid: 'dots', finger: false, theme: 'auto', pv: 2,
@@ -1290,7 +1290,7 @@ async function openBoard(id) {
   hideFind();
   undoStack = []; redoStack = []; updateUndo();
   $('#titleText').textContent = b.title;
-  document.title = b.title + ' — Easyform';
+  document.title = b.title + ' — EzDraw';
   $('#gallery').hidden = true; boardEl.hidden = false;
   store.kvSet('last', id).catch(() => {});
   resize();
@@ -1333,7 +1333,7 @@ async function showGallery() {
   }
   $('#gCount').textContent = list.length === 1 ? '1 Board' : list.length + ' Boards';
   boardEl.hidden = true; $('#gallery').hidden = false;
-  document.title = 'Easyform';
+  document.title = 'EzDraw';
 }
 $('#bNew').addEventListener('click', async () => { const b = await createBoard('Untitled'); openBoard(b.id); });
 
@@ -1387,7 +1387,7 @@ async function exportImage() {
 function backupBoard() {
   const r2 = x => Math.round(x * 100) / 100;
   const data = {
-    app: 'easyform', version: 1,
+    app: 'ezdraw', version: 1,
     board: { title: board.title, created: board.created, updated: board.updated, view: { ...v } },
     strokes: strokes.map(s => s.tool === 'fill'
       ? { seq: s.seq, tool: s.tool, color: s.color, opacity: s.opacity, ox: s.ox, oy: s.oy, res: s.res, rows: Array.from(s.rows) }
@@ -1401,7 +1401,7 @@ $('#fileIn').addEventListener('change', async e => {
   if (!f) return;
   try {
     const data = JSON.parse(await f.text());
-    if (data.app !== 'easyform' || !Array.isArray(data.strokes)) throw new Error('not an Easyform backup');
+    if (!['ezdraw', 'easyform'].includes(data.app) || !Array.isArray(data.strokes)) throw new Error('not an Easyform backup');
     const b = await createBoard(String(data.board?.title || 'Restored Board').slice(0, 60));
     b.view = data.board?.view || b.view; b.created = data.board?.created || b.created;
     await store.putBoard(b);
@@ -1418,7 +1418,7 @@ $('#fileIn').addEventListener('change', async e => {
     await leaveBoard();
     await openBoard(b.id);
     toast('Backup restored');
-  } catch (err) { console.error(err); alert('That file couldn’t be restored. Pick an Easyform backup (.json).'); }
+  } catch (err) { console.error(err); alert('That file couldn’t be restored. Pick an EzDraw backup (.json).'); }
 });
 function offerFile(file, heading, preview) {
   const m = $('#modal');
@@ -1449,7 +1449,7 @@ async function init() {
   try { db = await openDB(); } catch (e) { db = null; console.warn('IndexedDB unavailable', e); }
   try {
     const p = await store.kvGet('prefs');
-    if (p && p.t) { prefs = { ...prefs, ...p, t: { ...prefs.t, ...p.t } }; if (!TOOLS[prefs.tool]) prefs.tool = 'pen'; if (prefs.grid === true) prefs.grid = 'lines'; if (!p.pv) { prefs.grid = 'dots'; prefs.pv = 2; savePrefs(); } }
+    if (p && p.t) { prefs = { ...prefs, ...p, t: { ...prefs.t, ...p.t } }; if (!TOOLS[prefs.tool] || !ORDER.includes(prefs.tool)) prefs.tool = 'pen'; if (prefs.grid === true) prefs.grid = 'lines'; if (!p.pv) { prefs.grid = 'dots'; prefs.pv = 2; savePrefs(); } }
   } catch (_) {}
   buildPalette();
   applyTheme();
