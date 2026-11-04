@@ -76,7 +76,9 @@ canvas{position:absolute;left:0;top:0}
   filter:drop-shadow(0 .5px .6px rgba(0,0,0,.35)) drop-shadow(0 2px 3px rgba(0,0,0,.08))}
 .tool.sel svg{transform:translateY(-17px)}
 .vsep{width:.5px;background:var(--sep);margin:18px 14px 18px 12px;flex:none}
-.colors{display:grid;grid-template-columns:repeat(3,32px);grid-auto-rows:32px;gap:4px 6px;align-content:center}
+.colors{display:grid;grid-template-columns:repeat(4,32px);grid-auto-rows:32px;gap:4px 6px;align-content:center}
+.colors .sw:nth-child(4){grid-row:2;grid-column:1}.colors .sw:nth-child(5){grid-row:2;grid-column:2}.colors .sw:nth-child(6){grid-row:2;grid-column:3}
+.colors .sw.wheel{grid-row:1/3;grid-column:4;align-self:center}
 .sw{width:32px;height:32px;border-radius:50%;display:grid;place-items:center}
 .sw i{display:block;width:26px;height:26px;border-radius:50%;background:var(--c);box-shadow:inset 0 0 0 .5px rgba(0,0,0,.18);transition:all .15s}
 .sw.sel i{width:20px;height:20px;box-shadow:0 0 0 2.5px var(--ring),0 0 0 4.5px var(--c)}
@@ -247,7 +249,7 @@ let lastRenderMs = 0, gesturing = false, base = null, lastFull = 0;
 const pathCache = new WeakMap();
 
 /* ---------------- tools ---------------- */
-const PRESETS = ['#000000', '#007AFF', '#34C759', '#FFCC00', '#FF3B30'];
+const PRESETS = ['#000000', '#007AFF', '#34C759', '#FFCC00', '#FF9500', '#FF3B30'];
 const TOOLS = {
   pen:      { kind: 'fill', widths: [1, 2, 3.5, 6, 10],   curve: p => 0.35 + 0.95 * p },
   monoline: { kind: 'line', widths: [1, 2, 3.5, 6, 10] },
@@ -257,19 +259,20 @@ const TOOLS = {
   crayon:   { kind: 'fill', widths: [6, 10, 16, 24, 34],  curve: p => 0.8 + 0.4 * p, texture: 'crayon' },
   glitter:  { kind: 'fill', widths: [6, 10, 16, 24, 34],  curve: p => 0.8 + 0.4 * p, texture: 'glitter' },
   rainbow:  { kind: 'rainbow', widths: [3, 5, 8, 13, 20], nocolor: true },
-  fill:     { kind: 'area' },
+  fill:     { kind: 'area', widths: [4, 8, 14, 22, 32] },   // tap = bucket fill (old fills); drag = paint brush below
+  paint:    { kind: 'blob', widths: [4, 8, 14, 22, 32] },   // fill brush stroke: fills itself in when it closes a loop
   stamp:    { kind: 'stamp', widths: [32, 48, 72, 104, 150], nocolor: true },
   eraser:   { kind: 'erase', widths: [8, 16, 30, 50, 80] },
 };
 const ORDER = ['pen', 'monoline', 'fountain', 'marker', 'pencil', 'crayon', 'glitter', 'rainbow', 'fill', 'eraser'];   // stamps hidden for now (old ones still show)
 const STAMPS = ['⭐️', '❤️', '🌈', '☀️', '🌙', '☁️', '🌸', '🌻', '🌳', '🍎', '🍓', '🎈', '🐶', '🐱', '🐰', '🦄', '🐻', '🐟', '🦋', '🐞', '🦖', '🚗', '🚀', '🏠'];
 let prefs = {
-  tool: 'pen', lastDraw: 'pen', grid: 'dots', finger: false, theme: 'auto', pv: 2,
+  tool: 'pen', lastDraw: 'pen', grid: 'dots', finger: false, theme: 'auto', pv: 3,
   t: {
     pen: { color: '#000000', wi: 1, op: 1 }, monoline: { color: '#007AFF', wi: 1, op: 1 },
     fountain: { color: '#000000', wi: 1, op: 1 },
     marker: { color: '#FFCC00', wi: 2, op: 1 }, pencil: { color: '#000000', wi: 1, op: 1 },
-    crayon: { color: '#FF3B30', wi: 2, op: 1 }, fill: { color: '#007AFF', wi: 0, op: 1 },
+    crayon: { color: '#FF3B30', wi: 2, op: 1 }, fill: { color: '#007AFF', wi: 2, op: 1 },
     glitter: { color: '#AF52DE', wi: 2, op: 1 }, rainbow: { wi: 2, op: 1 }, stamp: { wi: 2, emoji: '⭐️' },
     eraser: { wi: 2, mode: 'pixel' },
   },
@@ -367,15 +370,12 @@ function buildPath(s) {
     for (let i = 1; i < n; i++) path.lineTo(P[i * 3], P[i * 3 + 1]);
     return path;
   }
-  if (T.kind === 'line') {
-    path.moveTo(P[0], P[1]);
-    if (n === 1) { path.lineTo(P[0] + 0.01, P[1]); return path; }
-    for (let i = 1; i < n - 1; i++) {
-      const x = P[i * 3], y = P[i * 3 + 1];
-      path.quadraticCurveTo(x, y, (x + P[i * 3 + 3]) / 2, (y + P[i * 3 + 4]) / 2);
-    }
-    path.lineTo(P[(n - 1) * 3], P[(n - 1) * 3 + 1]);
-    return path;
+  if (T.kind === 'line') return smoothLine(P, 0, n - 1, false);
+  if (T.kind === 'blob') {                // fill brush: the stroke itself, plus the inside of its loop
+    const L = s.loop && s.loop[1] < n ? s.loop : null;
+    const line = smoothLine(P, 0, n - 1, false);
+    if (L) { line.moveTo(P[L[1] * 3], P[L[1] * 3 + 1]); line.lineTo(P[L[0] * 3], P[L[0] * 3 + 1]); }   // brush over the closing gap
+    return { line, area: L ? smoothLine(P, L[0], L[1], true) : null };
   }
   // pressure-sensitive outline (filled)
   const r = new Float32Array(n);
@@ -412,6 +412,55 @@ function buildPath(s) {
   path.closePath();
   return path;
 }
+function smoothLine(P, a, b, closed) {    // points a..b (inclusive), smoothed with midpoint curves
+  const path = new Path2D();
+  path.moveTo(P[a * 3], P[a * 3 + 1]);
+  if (a === b) { path.lineTo(P[a * 3] + 0.01, P[a * 3 + 1]); return path; }
+  for (let i = a + 1; i < b; i++) {
+    const x = P[i * 3], y = P[i * 3 + 1];
+    path.quadraticCurveTo(x, y, (x + P[i * 3 + 3]) / 2, (y + P[i * 3 + 4]) / 2);
+  }
+  path.lineTo(P[b * 3], P[b * 3 + 1]);
+  if (closed) path.closePath();
+  return path;
+}
+/* does a fill-brush stroke close a loop?  Returns [first, last] point index of the biggest loop, or null.
+   Counts: ending near the start, ending near (or starting near) some other part of the stroke, or crossing itself. */
+function findLoop(P, scale) {
+  const n = P.length / 3;
+  if (n < 6) return null;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i < n; i++) { const x = P[i * 3], y = P[i * 3 + 1]; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  const diag = Math.hypot(x1 - x0, y1 - y0), tol = clamp(diag * 0.14, 26 / scale, 70 / scale), minArea = (22 / scale) ** 2;
+  const area = (a, b) => { let A = 0; for (let i = a; i <= b; i++) { const j = i === b ? a : i + 1; A += P[i * 3] * P[j * 3 + 1] - P[j * 3] * P[i * 3 + 1]; } return Math.abs(A / 2); };
+  const cands = [];
+  const d = (i, j) => Math.hypot(P[i * 3] - P[j * 3], P[i * 3 + 1] - P[j * 3 + 1]);
+  if (d(0, n - 1) <= tol) cands.push([0, n - 1]);
+  // decimated copy (≤ 500 vertices) for the O(n²) searches
+  const st = Math.max(1, Math.ceil(n / 500)), I = [];
+  for (let i = 0; i < n; i += st) I.push(i);
+  if (I[I.length - 1] !== n - 1) I.push(n - 1);
+  const m = I.length, arc = new Float32Array(m);
+  for (let k = 1; k < m; k++) arc[k] = arc[k - 1] + d(I[k - 1], I[k]);
+  for (let k = 0; k < m; k++) {             // an end coming back to the middle of the stroke (a "6" or "9")
+    if (arc[m - 1] - arc[k] > tol * 3 && d(I[k], n - 1) <= tol * 0.6) cands.push([I[k], n - 1]);
+    if (arc[k] > tol * 3 && d(0, I[k]) <= tol * 0.6) cands.push([0, I[k]]);
+  }
+  for (let a = 0; a < m - 1; a++) {         // self-crossings
+    const ax = P[I[a] * 3], ay = P[I[a] * 3 + 1], bx = P[I[a + 1] * 3], by = P[I[a + 1] * 3 + 1];
+    for (let b = a + 2; b < m - 1; b++) {
+      const cx = P[I[b] * 3], cy = P[I[b] * 3 + 1], ex = P[I[b + 1] * 3], ey = P[I[b + 1] * 3 + 1];
+      const den = (bx - ax) * (ey - cy) - (by - ay) * (ex - cx);
+      if (!den) continue;
+      const t = ((cx - ax) * (ey - cy) - (cy - ay) * (ex - cx)) / den, u = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / den;
+      if (t >= 0 && t <= 1 && u >= 0 && u <= 1) cands.push([I[a + 1], I[b]]);
+    }
+  }
+  let best = null, bestA = minArea;
+  for (const c of cands) { if (c[1] - c[0] < 3) continue; const A = area(c[0], c[1]); if (A > bestA) { bestA = A; best = c; } }
+  return best;
+}
+const hitCtx = document.createElement('canvas').getContext('2d');
 function getPath(s) {
   let p = pathCache.get(s);
   if (!p) { p = buildPath(s); pathCache.set(s, p); }
@@ -521,6 +570,12 @@ function drawStroke(c, s, path) {
     c.font = `${s.width}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
     c.textAlign = 'center'; c.textBaseline = 'middle';
     c.fillText(s.emoji, s.pts[0], s.pts[1] + s.width * 0.05);
+  } else if (T.kind === 'blob') {
+    const col = ink(s.color);
+    c.globalAlpha = s.opacity ?? 1; c.fillStyle = c.strokeStyle = col;
+    if (path.area) c.fill(path.area);
+    c.lineCap = c.lineJoin = 'round'; c.lineWidth = s.width;
+    c.stroke(path.line);
   } else if (T.kind === 'rainbow') {
     c.globalAlpha = s.opacity ?? 1; c.lineCap = c.lineJoin = 'round'; c.lineWidth = s.width;
     for (const ch of path) { c.strokeStyle = ink(ch.col); c.stroke(ch.p); }
@@ -599,6 +654,10 @@ function drawLive() {
     return;
   }
   setView(lctx);
+  if (pen.stroke.tool === 'paint') {
+    const P = pen.pts, n = P.length / 3;
+    pen.stroke.loop = n > 8 && Math.hypot(P[0] - P[n * 3 - 3], P[1] - P[n * 3 - 2]) < 26 / v.s ? [0, n - 1] : null;
+  }
   drawStroke(lctx, pen.stroke, buildPath(pen.stroke));
 }
 let gridMode = null;
@@ -657,8 +716,8 @@ function endGesture() {
 let pen = null;
 function startStroke(e, type) {
   const name = prefs.tool, st = prefs.t[name], T = TOOLS[name];
-  pen = { id: e.pointerId, type, tool: name, mode: name === 'eraser' ? st.mode : null, pts: [], removed: [], lastP: null, cx: e.clientX, cy: e.clientY };
-  pen.stroke = { tool: name, color: st.color || '#000000', width: T.widths[st.wi] / v.s, opacity: st.op ?? 1, pts: pen.pts };
+  pen = { id: e.pointerId, type, tool: name, mode: name === 'eraser' ? st.mode : null, pts: [], removed: [], lastP: null, cx: e.clientX, cy: e.clientY, sx: e.clientX, sy: e.clientY, t0: performance.now() };
+  pen.stroke = { tool: name === 'fill' ? 'paint' : name, color: st.color || '#000000', width: T.widths[st.wi] / v.s, opacity: st.op ?? 1, pts: pen.pts };
   if (name === 'rainbow') { pen.stroke.hue0 = Math.floor(Math.random() * 360); pen.stroke.hr = 1 / v.s; }
   if (name === 'stamp') pen.stroke.emoji = st.emoji;
   live.style.mixBlendMode = name === 'marker' ? (dark ? 'screen' : 'multiply') : 'normal';
@@ -705,6 +764,7 @@ function sweepErase(x0, y0, x1, y1) {
       if (s.tool === 'eraser' || x < b[0] - r || x > b[2] + r || y < b[1] - r || y > b[3] + r) continue;
       let near = false;
       if (s.tool === 'fill') near = insideFill(s, x, y);
+      else if (s.loop && getPath(s).area && hitCtx.isPointInPath(getPath(s).area, x, y)) near = true;
       else {
         const P = s.pts, tol = r + s.width * 0.6;
         near = P.length === 3 && Math.hypot(x - P[0], y - P[1]) <= tol;
@@ -787,7 +847,7 @@ function spill(out) {                       // show the paint leaking out, then 
   const a = live.animate([{ opacity: 1 }, { opacity: 1, offset: 0.35 }, { opacity: 0 }], { duration: 950 });
   a.onfinish = () => { if (!pen) { lctx.setTransform(1, 0, 0, 1, 0, 0); lctx.clearRect(0, 0, W, H); } };
 }
-function doFill(cx, cy) {
+function doFill(cx, cy, soft = false) {   // soft: just report failure (the tap becomes a dot instead)
   const st = prefs.t.fill;
   hideFind();
   maskC.width = W; maskC.height = H;
@@ -804,6 +864,7 @@ function doFill(cx, cy) {
     else if (T.kind === 'line') { g.lineWidth = Math.max(s.width, 1.5 / k); g.stroke(p); }
     else if (T.kind === 'rainbow') { g.lineWidth = Math.max(s.width, 1.5 / k); for (const ch of p) g.stroke(ch.p); }
     else if (T.kind === 'stamp') drawStroke(g, s, p);
+    else if (T.kind === 'blob') { g.lineWidth = Math.max(s.width, 1.5 / k); g.stroke(p.line); if (p.area) g.fill(p.area); }
     else { g.fill(p); g.lineWidth = 1.5 / k; g.stroke(p); }
   }
   const data = g.getImageData(0, 0, W, H).data;
@@ -813,14 +874,14 @@ function doFill(cx, cy) {
   chamfer(D, W, H);                                       // D = distance to the nearest ink
   const sx = clamp(Math.round(cx * DPR), 0, W - 1), sy = clamp(Math.round(cy * DPR), 0, H - 1), at = D[sy * W + sx];
   const gaps = [2.5, 6, 12].map(x => Math.round(x * DPR));
-  if (at <= 3 * gaps[0]) { nope(cx, cy); return; }        // tapped on a line
+  if (at <= 3 * gaps[0]) { if (!soft) nope(cx, cy); return false; }        // tapped on a line
   let res = null, gap = 0;
   for (const gp of gaps) {
     if (at <= 3 * gp) break;
     const r = flood(D, 3 * gp, sx, sy, true);
     if (!r.leaked) { res = r; gap = gp; break; }
   }
-  if (!res) { spill(flood(D, 3 * gaps[0], sx, sy, false).out); nope(cx, cy); return; }
+  if (!res) { if (!soft) { spill(flood(D, 3 * gaps[0], sx, sy, false).out); nope(cx, cy); } return false; }
   const { out, minX, maxX, minY, maxY } = res;
   // grow the fill back out so it tucks under the outline (round growth: no corners poking out)
   const rad = gap + 1;
@@ -848,6 +909,7 @@ function doFill(cx, cy) {
   store.putStrokes([s]).catch(saveErr);
   pushOp({ type: 'add', strokes: [s] });
   touchBoard();
+  return true;
 }
 
 function finishStroke() {
@@ -859,8 +921,14 @@ function finishStroke() {
     return;
   }
   if (!p.pts.length) return;
-  const s = { id: uid(), board: board.id, seq: nextSeq++, tool: p.tool, color: p.stroke.color, width: p.stroke.width, opacity: p.stroke.opacity, pts: new Float32Array(p.pts) };
-  for (const k of ['hue0', 'hr', 'emoji']) if (p.stroke[k] !== undefined) s[k] = p.stroke[k];
+  if (p.tool === 'fill') {
+    const P = p.pts; let far = 0;
+    for (let i = 0; i < P.length; i += 3) far = Math.max(far, Math.hypot(P[i] - P[0], P[i + 1] - P[1]) * v.s);
+    if (far < 8 && performance.now() - p.t0 < 450 && doFill(p.sx, p.sy, true)) return;   // a tap inside a shape: bucket fill
+    p.stroke.loop = findLoop(P, v.s);
+  }
+  const s = { id: uid(), board: board.id, seq: nextSeq++, tool: p.stroke.tool, color: p.stroke.color, width: p.stroke.width, opacity: p.stroke.opacity, pts: new Float32Array(p.pts) };
+  for (const k of ['hue0', 'hr', 'emoji', 'loop']) if (p.stroke[k] !== undefined) s[k] = p.stroke[k];
   s.bbox = calcBBox(s);
   strokes.push(s);
   if (p.tool !== 'eraser') { setView(ctx); drawStroke(ctx, s, getPath(s)); }
@@ -921,7 +989,6 @@ function onDown(e) {
     if (pen) return;
     if (touches.size) { for (const id of touches.keys()) ignored.add(id); touches.clear(); tap = null; g = null; }
     endGesture();
-    if (prefs.tool === 'fill') { doFill(e.clientX, e.clientY); return; }
     startStroke(e, e.pointerType);
     return;
   }
@@ -935,7 +1002,7 @@ function onDown(e) {
   if (!touches.size && !tap) tap = { t: performance.now(), max: 0, moved: 0 };
   touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (tap) tap.max = Math.max(tap.max, touches.size);
-  if (prefs.finger && touches.size === 1 && prefs.tool !== 'fill') { touches.delete(e.pointerId); startStroke(e, 'touch'); return; }
+  if (prefs.finger && touches.size === 1) { touches.delete(e.pointerId); startStroke(e, 'touch'); return; }
   baseline();
 }
 function onMove(e) {
@@ -1391,7 +1458,7 @@ function backupBoard() {
     board: { title: board.title, created: board.created, updated: board.updated, view: { ...v } },
     strokes: strokes.map(s => s.tool === 'fill'
       ? { seq: s.seq, tool: s.tool, color: s.color, opacity: s.opacity, ox: s.ox, oy: s.oy, res: s.res, rows: Array.from(s.rows) }
-      : { seq: s.seq, tool: s.tool, color: s.color, width: s.width, opacity: s.opacity, pts: Array.from(s.pts, r2), hue0: s.hue0, hr: s.hr, emoji: s.emoji }),
+      : { seq: s.seq, tool: s.tool, color: s.color, width: s.width, opacity: s.opacity, pts: Array.from(s.pts, r2), hue0: s.hue0, hr: s.hr, emoji: s.emoji, loop: s.loop }),
   };
   const file = new File([JSON.stringify(data)], safeName(board.title) + ' backup.json', { type: 'application/json' });
   offerFile(file, 'Backup Ready', null);
@@ -1411,6 +1478,10 @@ $('#fileIn').addEventListener('change', async e => {
       if (s.tool === 'fill') Object.assign(x, { width: 0, ox: +s.ox || 0, oy: +s.oy || 0, res: +s.res, rows: Uint16Array.from(s.rows) });
       else Object.assign(x, { width: +s.width || 2, pts: new Float32Array(s.pts) });
       if (s.tool === 'rainbow') { x.hue0 = +s.hue0 || 0; x.hr = +s.hr || 1; }
+      if (s.tool === 'paint' && Array.isArray(s.loop) && s.loop.length === 2) {
+        const a = s.loop[0] | 0, b = s.loop[1] | 0;
+        if (a >= 0 && b > a && b < x.pts.length / 3) x.loop = [a, b];
+      }
       if (s.tool === 'stamp') x.emoji = String(s.emoji || '⭐️').slice(0, 8);
       x.bbox = calcBBox(x); return x;
     });
@@ -1449,7 +1520,7 @@ async function init() {
   try { db = await openDB(); } catch (e) { db = null; console.warn('IndexedDB unavailable', e); }
   try {
     const p = await store.kvGet('prefs');
-    if (p && p.t) { prefs = { ...prefs, ...p, t: { ...prefs.t, ...p.t } }; if (!TOOLS[prefs.tool] || !ORDER.includes(prefs.tool)) prefs.tool = 'pen'; if (prefs.grid === true) prefs.grid = 'lines'; if (!p.pv) { prefs.grid = 'dots'; prefs.pv = 2; savePrefs(); } }
+    if (p && p.t) { prefs = { ...prefs, ...p, t: { ...prefs.t, ...p.t } }; if (!TOOLS[prefs.tool] || !ORDER.includes(prefs.tool)) prefs.tool = 'pen'; if (prefs.grid === true) prefs.grid = 'lines'; if (!p.pv) { prefs.grid = 'dots'; prefs.pv = 2; } if (prefs.pv < 3) { prefs.t.fill.wi = 2; prefs.pv = 3; savePrefs(); } }
   } catch (_) {}
   buildPalette();
   applyTheme();
