@@ -68,15 +68,16 @@ canvas{position:absolute;left:0;top:0}
 
 /* ---------- tool palette ---------- */
 #palette{position:absolute;left:50%;bottom:calc(env(safe-area-inset-bottom) + 14px);transform:translateX(-50%);height:100px;border-radius:26px;
-  display:flex;align-items:stretch;padding:0 16px 0 14px;transition:transform .28s cubic-bezier(.3,.7,.3,1),opacity .2s}
+  display:flex;align-items:stretch;padding:0 16px 0 14px;max-width:calc(100vw - 16px);transition:transform .28s cubic-bezier(.3,.7,.3,1),opacity .2s}
 #palette.away{transform:translate(-50%,150%);opacity:0;pointer-events:none}
-.tools{display:flex;gap:3px;overflow:hidden;height:100%}
-.tool{width:36px;height:100%;position:relative;flex:none}
-.tool svg{position:absolute;left:3px;bottom:-16px;width:30px;height:90px;transition:transform .2s cubic-bezier(.3,.7,.4,1);
+.tools{display:flex;gap:3px;overflow-x:auto;overflow-y:hidden;height:100%;min-width:0;flex:0 1 auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.tools::-webkit-scrollbar{display:none}
+.tool{flex:1 1 36px;min-width:28px;max-width:36px;height:100%;position:relative}      /* squeeze together before scrolling */
+.tool svg{position:absolute;left:50%;margin-left:-15px;bottom:-16px;width:30px;height:90px;transition:transform .2s cubic-bezier(.3,.7,.4,1);
   filter:drop-shadow(0 .5px .6px rgba(0,0,0,.35)) drop-shadow(0 2px 3px rgba(0,0,0,.08))}
 .tool.sel svg{transform:translateY(-17px)}
 .vsep{width:.5px;background:var(--sep);margin:18px 14px 18px 12px;flex:none}
-.colors{display:grid;grid-template-columns:repeat(4,32px);grid-auto-rows:32px;gap:4px 6px;align-content:center}
+.colors{flex:none;display:grid;grid-template-columns:repeat(4,32px);grid-auto-rows:32px;gap:4px 6px;align-content:center}
 .colors .sw:nth-child(4){grid-row:2;grid-column:1}.colors .sw:nth-child(5){grid-row:2;grid-column:2}.colors .sw:nth-child(6){grid-row:2;grid-column:3}
 .colors .sw.wheel{grid-row:1/3;grid-column:4;align-self:center}
 .sw{width:32px;height:32px;border-radius:50%;display:grid;place-items:center}
@@ -349,19 +350,30 @@ function buildPath(s) {
   }
   const P = s.pts, n = P.length / 3;
   if (T.kind === 'stamp') return null;
-  if (T.kind === 'rainbow') {              // short pieces, each a step further round the color wheel
-    const out = [], step = 10 / s.hr;
+  if (T.kind === 'rainbow') {              // short even pieces, each a step further round the color wheel
+    const hr = rainbowRate(s), step = 5 / hr, ov = step * 0.3;
+    const col = d => hsl((s.hue0 + d * hr) % 360, 92, 55);
+    const out = [{ cap: [P[0], P[1]], col: col(0) }];          // round ends; the pieces between meet in straight edges
+    if (n === 1) return out;
     let p = new Path2D(), done = 0, acc = 0;
     p.moveTo(P[0], P[1]);
-    if (n === 1) { p.lineTo(P[0] + 0.01, P[1]); return [{ p, col: hsl(s.hue0 % 360, 92, 55) }]; }
-    for (let i = 1; i < n; i++) {
-      acc += Math.hypot(P[i * 3] - P[i * 3 - 3], P[i * 3 + 1] - P[i * 3 - 2]);
-      p.lineTo(P[i * 3], P[i * 3 + 1]);
-      if (acc >= step || i === n - 1) {
-        out.push({ p, col: hsl((s.hue0 + (done + acc / 2) * s.hr) % 360, 92, 55) });
-        done += acc; acc = 0; p = new Path2D(); p.moveTo(P[i * 3], P[i * 3 + 1]);
+    for (let i = 1; i < n; i++) {          // cut every `step` along the line, even between far-apart points
+      let ax = P[i * 3 - 3], ay = P[i * 3 - 2];
+      const bx = P[i * 3], by = P[i * 3 + 1];
+      let d = Math.hypot(bx - ax, by - ay);
+      const ux = d ? (bx - ax) / d : 0, uy = d ? (by - ay) / d : 0;
+      while (acc + d >= step) {
+        const t = (step - acc) / d, cx = ax + (bx - ax) * t, cy = ay + (by - ay) * t;
+        p.lineTo(cx, cy);
+        out.push({ p, col: col(done + step / 2) });
+        done += step; acc = 0; p = new Path2D();
+        p.moveTo(cx - ux * ov, cy - uy * ov); p.lineTo(cx, cy);   // start a little early, so no gap shows at the join
+        ax = cx; ay = cy; d = Math.hypot(bx - ax, by - ay);
       }
+      if (d > 0) { p.lineTo(bx, by); acc += d; }
     }
+    if (acc > 0) out.push({ p, col: col(done + acc / 2) });
+    out.push({ cap: [P[n * 3 - 3], P[n * 3 - 2]], col: col(done + acc) });
     return out;
   }
   if (T.kind === 'erase') {               // straight segments, matches live erasing exactly
@@ -412,6 +424,9 @@ function buildPath(s) {
   path.closePath();
   return path;
 }
+/* rainbow: degrees of color per board unit, so the colors turn about 1° per screen pixel at the zoom it was drawn at.
+   Lines saved before this was fixed stored the zoom upside down (rv is missing on those). */
+function rainbowRate(s) { return clamp((s.rv === 2 ? s.hr : 1 / s.hr) || 1, 0.1, 10); }
 function smoothLine(P, a, b, closed) {    // points a..b (inclusive), smoothed with midpoint curves
   const path = new Path2D();
   path.moveTo(P[a * 3], P[a * 3 + 1]);
@@ -556,6 +571,20 @@ function ink(hex) {
   return o;
 }
 
+/* A see-through stroke made of overlapping parts (a filled loop and its outline, the pieces of a rainbow) would show
+   darker where the parts overlap. So it is painted solid on a spare layer first, then laid down see-through in one go. */
+const flatC = document.createElement('canvas');
+function flat(c, s, alpha, paint) {
+  const m = c.getTransform(), b = s.bbox || calcBBox(s);
+  const X0 = Math.max(0, Math.floor(m.a * b[0] + m.e) - 1), Y0 = Math.max(0, Math.floor(m.d * b[1] + m.f) - 1);
+  const X1 = Math.min(c.canvas.width, Math.ceil(m.a * b[2] + m.e) + 1), Y1 = Math.min(c.canvas.height, Math.ceil(m.d * b[3] + m.f) + 1);
+  if (X1 <= X0 || Y1 <= Y0) return;
+  flatC.width = X1 - X0; flatC.height = Y1 - Y0;
+  const t = flatC.getContext('2d');
+  t.setTransform(m.a, 0, 0, m.d, m.e - X0, m.f - Y0);
+  paint(t);
+  c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.globalAlpha = alpha; c.drawImage(flatC, X0, Y0); c.restore();
+}
 function drawStroke(c, s, path) {
   const T = TOOLS[s.tool];
   if (T.kind === 'erase') {
@@ -571,14 +600,24 @@ function drawStroke(c, s, path) {
     c.textAlign = 'center'; c.textBaseline = 'middle';
     c.fillText(s.emoji, s.pts[0], s.pts[1] + s.width * 0.05);
   } else if (T.kind === 'blob') {
-    const col = ink(s.color);
-    c.globalAlpha = s.opacity ?? 1; c.fillStyle = c.strokeStyle = col;
-    if (path.area) c.fill(path.area);
-    c.lineCap = c.lineJoin = 'round'; c.lineWidth = s.width;
-    c.stroke(path.line);
+    const col = ink(s.color), a = s.opacity ?? 1;
+    const paint = t => {
+      t.fillStyle = t.strokeStyle = col;
+      if (path.area) t.fill(path.area);
+      t.lineCap = t.lineJoin = 'round'; t.lineWidth = s.width;
+      t.stroke(path.line);
+    };
+    if (a < 1 && path.area) flat(c, s, a, paint); else { c.globalAlpha = a; paint(c); }
   } else if (T.kind === 'rainbow') {
-    c.globalAlpha = s.opacity ?? 1; c.lineCap = c.lineJoin = 'round'; c.lineWidth = s.width;
-    for (const ch of path) { c.strokeStyle = ink(ch.col); c.stroke(ch.p); }
+    const a = s.opacity ?? 1;
+    const paint = t => {
+      t.lineCap = 'butt'; t.lineJoin = 'round'; t.lineWidth = s.width;
+      for (const ch of path) {
+        if (ch.cap) { t.fillStyle = ink(ch.col); t.beginPath(); t.arc(ch.cap[0], ch.cap[1], s.width / 2, 0, Math.PI * 2); t.fill(); }
+        else { t.strokeStyle = ink(ch.col); t.stroke(ch.p); }
+      }
+    };
+    if (a < 1) flat(c, s, a, paint); else { c.globalAlpha = a; paint(c); }
   } else {
     const col = ink(s.color);
     c.globalAlpha = s.opacity * (T.blend && dark ? Math.min(1, (T.alpha || 1) * 1.5) : (T.alpha || 1));
@@ -718,7 +757,7 @@ function startStroke(e, type) {
   const name = prefs.tool, st = prefs.t[name], T = TOOLS[name];
   pen = { id: e.pointerId, type, tool: name, mode: name === 'eraser' ? st.mode : null, pts: [], removed: [], lastP: null, cx: e.clientX, cy: e.clientY, sx: e.clientX, sy: e.clientY, t0: performance.now() };
   pen.stroke = { tool: name === 'fill' ? 'paint' : name, color: st.color || '#000000', width: T.widths[st.wi] / v.s, opacity: st.op ?? 1, pts: pen.pts };
-  if (name === 'rainbow') { pen.stroke.hue0 = Math.floor(Math.random() * 360); pen.stroke.hr = 1 / v.s; }
+  if (name === 'rainbow') { pen.stroke.hue0 = Math.floor(Math.random() * 360); pen.stroke.hr = v.s; pen.stroke.rv = 2; }
   if (name === 'stamp') pen.stroke.emoji = st.emoji;
   live.style.mixBlendMode = name === 'marker' ? (dark ? 'screen' : 'multiply') : 'normal';
   hideFind();
@@ -862,7 +901,7 @@ function doFill(cx, cy, soft = false) {   // soft: just report failure (the tap 
     const T = TOOLS[s.tool], p = getPath(s);
     if (T.kind === 'erase') { g.globalCompositeOperation = 'destination-out'; g.lineWidth = s.width; g.stroke(p); g.globalCompositeOperation = 'source-over'; }
     else if (T.kind === 'line') { g.lineWidth = Math.max(s.width, 1.5 / k); g.stroke(p); }
-    else if (T.kind === 'rainbow') { g.lineWidth = Math.max(s.width, 1.5 / k); for (const ch of p) g.stroke(ch.p); }
+    else if (T.kind === 'rainbow') { g.lineWidth = Math.max(s.width, 1.5 / k); for (const ch of p) if (ch.p) g.stroke(ch.p); else { g.beginPath(); g.arc(ch.cap[0], ch.cap[1], g.lineWidth / 2, 0, Math.PI * 2); g.fill(); } }
     else if (T.kind === 'stamp') drawStroke(g, s, p);
     else if (T.kind === 'blob') { g.lineWidth = Math.max(s.width, 1.5 / k); g.stroke(p.line); if (p.area) g.fill(p.area); }
     else { g.fill(p); g.lineWidth = 1.5 / k; g.stroke(p); }
@@ -928,7 +967,7 @@ function finishStroke() {
     p.stroke.loop = findLoop(P, v.s);
   }
   const s = { id: uid(), board: board.id, seq: nextSeq++, tool: p.stroke.tool, color: p.stroke.color, width: p.stroke.width, opacity: p.stroke.opacity, pts: new Float32Array(p.pts) };
-  for (const k of ['hue0', 'hr', 'emoji', 'loop']) if (p.stroke[k] !== undefined) s[k] = p.stroke[k];
+  for (const k of ['hue0', 'hr', 'rv', 'emoji', 'loop']) if (p.stroke[k] !== undefined) s[k] = p.stroke[k];
   s.bbox = calcBBox(s);
   strokes.push(s);
   if (p.tool !== 'eraser') { setView(ctx); drawStroke(ctx, s, getPath(s)); }
@@ -939,6 +978,13 @@ function finishStroke() {
 function abortFingerStroke() {
   if (pen.tool === 'eraser') { finishStroke(); return; }
   pen = null; live.style.mixBlendMode = 'normal'; requestLive();
+}
+
+function pencilTakesOver() {                 // a resting palm's dot is dropped; a real finger-drawn line is kept
+  const P = pen.pts; let far = 0;
+  for (let i = 0; i < P.length; i += 3) far = Math.max(far, Math.hypot(P[i] - P[0], P[i + 1] - P[1]) * v.s);
+  if (pen.tool === 'eraser' || far >= 16) finishStroke();
+  else { pen = null; live.style.mixBlendMode = 'normal'; requestLive(); }
 }
 
 /* ---------------- undo / redo ---------------- */
@@ -986,7 +1032,11 @@ function onDown(e) {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   e.preventDefault();
   if (e.pointerType !== 'touch') {                 // Apple Pencil (or mouse)
-    if (pen) return;
+    if (pen) {                                     // "Draw with Finger" is on and a hand got there first:
+      if (pen.type !== 'touch' || e.pointerType !== 'pen') return;
+      ignored.add(pen.id); tap = null;             // the Pencil always wins; that hand is a palm from now on
+      pencilTakesOver();
+    }
     if (touches.size) { for (const id of touches.keys()) ignored.add(id); touches.clear(); tap = null; g = null; }
     endGesture();
     startStroke(e, e.pointerType);
@@ -1109,12 +1159,22 @@ function buildPalette() {
     + `<button class="sw wheel" id="wheel" aria-label="More colors"><i><b></b></i></button>`;
   refreshPalette();
 }
+function trayHint() {                       // tools fade out at an edge when there are more to scroll to
+  const max = toolsEl.scrollWidth - toolsEl.clientWidth, x = toolsEl.scrollLeft;
+  const m = max > 2 ? `linear-gradient(to right,${x > 2 ? 'transparent,#000 22px' : '#000,#000'},${x < max - 2 ? '#000 calc(100% - 22px),transparent' : '#000'})` : '';
+  toolsEl.style.webkitMaskImage = toolsEl.style.maskImage = m;
+}
+toolsEl.addEventListener('scroll', trayHint, { passive: true });
 const hasColor = n => TOOLS[n].kind !== 'erase' && !TOOLS[n].nocolor;
 const curColor = () => prefs.t[hasColor(prefs.tool) ? prefs.tool : (hasColor(prefs.lastDraw) ? prefs.lastDraw : 'pen')].color.toUpperCase();
 function refreshPalette() {
   for (const b of toolsEl.children) {
     const n = b.dataset.tool;
     b.classList.toggle('sel', n === prefs.tool);
+    if (n === prefs.tool) {                 // on a narrow screen the tools scroll: keep the chosen one in sight
+      const l = b.offsetLeft - toolsEl.offsetLeft, r = l + b.offsetWidth;
+      if (l < toolsEl.scrollLeft) toolsEl.scrollLeft = l; else if (r > toolsEl.scrollLeft + toolsEl.clientWidth) toolsEl.scrollLeft = r - toolsEl.clientWidth;
+    }
     if (prefs.t[n].color) b.style.setProperty('--c', ink(prefs.t[n].color));
   }
   for (const b of colorsEl.querySelectorAll('[data-color]')) b.style.setProperty('--c', ink(b.dataset.color));
@@ -1129,6 +1189,7 @@ function refreshPalette() {
   const wheel = $('#wheel');
   wheel.classList.toggle('sel', showSel && !matched);
   wheel.style.setProperty('--c', ink(cur));
+  trayHint();
 }
 toolsEl.addEventListener('click', e => {
   const b = e.target.closest('.tool'); if (!b) return;
@@ -1458,7 +1519,7 @@ function backupBoard() {
     board: { title: board.title, created: board.created, updated: board.updated, view: { ...v } },
     strokes: strokes.map(s => s.tool === 'fill'
       ? { seq: s.seq, tool: s.tool, color: s.color, opacity: s.opacity, ox: s.ox, oy: s.oy, res: s.res, rows: Array.from(s.rows) }
-      : { seq: s.seq, tool: s.tool, color: s.color, width: s.width, opacity: s.opacity, pts: Array.from(s.pts, r2), hue0: s.hue0, hr: s.hr, emoji: s.emoji, loop: s.loop }),
+      : { seq: s.seq, tool: s.tool, color: s.color, width: s.width, opacity: s.opacity, pts: Array.from(s.pts, r2), hue0: s.hue0, hr: s.hr, rv: s.rv, emoji: s.emoji, loop: s.loop }),
   };
   const file = new File([JSON.stringify(data)], safeName(board.title) + ' backup.json', { type: 'application/json' });
   offerFile(file, 'Backup Ready', null);
@@ -1477,7 +1538,7 @@ $('#fileIn').addEventListener('change', async e => {
       const x = { id: uid(), board: b.id, seq: s.seq ?? i + 1, tool: s.tool, color: String(s.color || '#000000'), opacity: s.opacity ?? 1 };
       if (s.tool === 'fill') Object.assign(x, { width: 0, ox: +s.ox || 0, oy: +s.oy || 0, res: +s.res, rows: Uint16Array.from(s.rows) });
       else Object.assign(x, { width: +s.width || 2, pts: new Float32Array(s.pts) });
-      if (s.tool === 'rainbow') { x.hue0 = +s.hue0 || 0; x.hr = +s.hr || 1; }
+      if (s.tool === 'rainbow') { x.hue0 = +s.hue0 || 0; x.hr = +s.hr || 1; if (s.rv === 2) x.rv = 2; }
       if (s.tool === 'paint' && Array.isArray(s.loop) && s.loop.length === 2) {
         const a = s.loop[0] | 0, b = s.loop[1] | 0;
         if (a >= 0 && b > a && b < x.pts.length / 3) x.loop = [a, b];
@@ -1514,7 +1575,7 @@ function offerFile(file, heading, preview) {
 function savePrefs() { store.kvSet('prefs', prefs).catch(() => {}); }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveMeta(true); });
 window.addEventListener('pagehide', () => saveMeta(true));
-window.addEventListener('resize', () => { if (!boardEl.hidden) resize(); closePop(); });
+window.addEventListener('resize', () => { if (!boardEl.hidden) resize(); closePop(); trayHint(); });
 
 async function init() {
   try { db = await openDB(); } catch (e) { db = null; console.warn('IndexedDB unavailable', e); }
