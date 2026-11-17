@@ -110,6 +110,7 @@ canvas{position:absolute;left:0;top:0}
 .mi+.mi{border-top:.5px solid var(--sep)}
 .mi.gap{border-top:8px solid var(--press)}
 .mi.danger{color:var(--red)}
+.mfoot{padding:9px 18px 7px;font-size:13px;color:var(--label2);text-align:center;border-top:.5px solid var(--sep)}
 .mi .chk{color:var(--blue);font-weight:600;width:18px;text-align:center}
 .mi:active{background:var(--press)}
 .mi svg{width:24px;height:24px;flex:none;color:var(--blue)}
@@ -271,6 +272,7 @@ const TOOLS = {
 };
 const ORDER = ['pen', 'monoline', 'fountain', 'marker', 'pencil', 'crayon', 'glitter', 'rainbow', 'fill', 'eraser'];   // stamps hidden for now (old ones still show)
 const STAMPS = ['⭐️', '❤️', '🌈', '☀️', '🌙', '☁️', '🌸', '🌻', '🌳', '🍎', '🍓', '🎈', '🐶', '🐱', '🐰', '🦄', '🐻', '🐟', '🦋', '🐞', '🦖', '🚗', '🚀', '🏠'];
+const VERSION = 9, VERSION_DATE = '17 Nov 2026';   // shown in the ••• menu; bump with CACHE in sw.js
 let prefs = {
   tool: 'pen', lastDraw: 'pen', grid: 'dots', finger: false, theme: 'auto', pv: 3,
   t: {
@@ -879,18 +881,33 @@ function sweepErase(x0, y0, x1, y1) {
     for (let i = strokes.length - 1; i >= 0; i--) {
       const s = strokes[i], b = s.bbox;
       if (s.tool === 'eraser' || x < b[0] - r || x > b[2] + r || y < b[1] - r || y > b[3] + r) continue;
-      let near = false;
-      if (s.tool === 'fill') near = insideFill(s, x, y);
-      else if (s.loop && getPath(s).area && hitCtx.isPointInPath(getPath(s).area, x, y)) near = true;
-      else {
-        const P = s.pts, tol = r + s.width * 0.6;
-        near = P.length === 3 && Math.hypot(x - P[0], y - P[1]) <= tol;
-        for (let j = 3; !near && j < P.length; j += 3) near = distSeg(x, y, P[j - 3], P[j - 2], P[j], P[j + 1]) <= tol;
-      }
-      if (near) { pen.removed.push(s); strokes.splice(i, 1); hit = true; }
+      if (hits(s, x, y, r)) { pen.removed.push(s); strokes.splice(i, 1); hit = true; }
     }
   }
   if (hit) requestRender();
+}
+function hits(s, x, y, r) {
+  if (s.tool === 'fill') return insideFill(s, x, y);
+  if (s.loop && getPath(s).area && hitCtx.isPointInPath(getPath(s).area, x, y)) return true;
+  const P = s.pts, tol = r + s.width * 0.6;
+  if (P.length === 3) return Math.hypot(x - P[0], y - P[1]) <= tol;
+  for (let j = 3; j < P.length; j += 3) if (distSeg(x, y, P[j - 3], P[j - 2], P[j], P[j + 1]) <= tol) return true;
+  return false;
+}
+/* tap with the eraser: the whole thing under the tap goes (the top one only) */
+function tapErase(cx, cy) {
+  settle();
+  const [x, y] = toWorld(cx, cy), r = 12 / v.s;
+  for (let i = strokes.length - 1; i >= 0; i--) {
+    const s = strokes[i], b = s.bbox;
+    if (s.tool === 'eraser' || x < b[0] - r - s.width || x > b[2] + r + s.width || y < b[1] - r - s.width || y > b[3] + r + s.width) continue;
+    if (!hits(s, x, y, r)) continue;
+    strokes.splice(i, 1);
+    pushOp({ type: 'remove', strokes: [s] }); store.delStrokes([s]).catch(saveErr); touchBoard();
+    requestRender();
+    return true;
+  }
+  return false;
 }
 function insideFill(s, x, y) {
   const row = Math.floor((y - s.oy) / s.res), col = (x - s.ox) / s.res, R = s.rows;
@@ -1033,6 +1050,14 @@ function finishStroke() {
   const p = pen; pen = null;
   live.style.mixBlendMode = 'normal';
   requestLive();
+  if (p.tool === 'eraser' && p.mode === 'pixel' && p.pts.length) {    // a quick tap removes the whole line instead of rubbing a dot
+    const P = p.pts; let far = 0;
+    for (let i = 0; i < P.length; i += 3) far = Math.max(far, Math.hypot(P[i] - P[0], P[i + 1] - P[1]) * v.s);
+    if (far < 6 && performance.now() - p.t0 < 300) {
+      requestRender();                    // bring back what the dot rubbed out
+      if (tapErase(p.sx, p.sy)) return;
+    }
+  }
   if (p.tool === 'eraser' && p.mode === 'object') {
     if (p.removed.length) { pushOp({ type: 'remove', strokes: p.removed }); store.delStrokes(p.removed).catch(saveErr); touchBoard(); }
     return;
@@ -1157,6 +1182,7 @@ function onUp(e) {
     if (tap.max === 2 && undo()) toast('Undo');
     else if (tap.max === 3 && redo()) toast('Redo');
     else if (tap.max === 1 && prefs.tool === 'fill' && tap.moved < 10) doFill(e.clientX, e.clientY);
+    else if (tap.max === 1 && prefs.tool === 'eraser' && tap.moved < 10) tapErase(e.clientX, e.clientY);
   }
   tap = null;
 }
@@ -1394,7 +1420,7 @@ const ICONS = {
   restore: '<path d="M12 14V3M8 7l4-4 4 4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
   trash: '<path d="M4 7h16M10 3.5h4M6 7l1 12.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5L18 7M10 11v6M14 11v6"/>',
 };
-function menu(items, anchor) {
+function menu(items, anchor, foot) {
   const node = el(`<div class="menu"></div>`);
   items.forEach(it => {
     const b = document.createElement('button');
@@ -1404,6 +1430,7 @@ function menu(items, anchor) {
     b.addEventListener('click', () => { closePop(); it.locked ? gate(it.action) : it.action(); });
     node.append(b);
   });
+  if (foot) { const f = document.createElement('div'); f.className = 'mfoot'; f.textContent = foot; node.append(f); }
   openPop(node, anchor.getBoundingClientRect(), 'below');
 }
 
@@ -1465,7 +1492,7 @@ $('#bMore').addEventListener('click', e => menu([
   { icon: 'backup', label: 'Back Up Board…', action: backupBoard },
   { icon: 'restore', label: 'Restore from Backup…', locked: true, action: () => $('#fileIn').click() },
   { icon: 'trash', label: 'Delete Board', locked: true, danger: true, gap: true, action: deleteBoard },
-], e.currentTarget));
+], e.currentTarget, `EzDraw version ${VERSION} · ${VERSION_DATE}`));
 
 /* ---------------- boards ---------------- */
 let metaTimer = 0, thumbTimer = 0;
@@ -1678,6 +1705,9 @@ async function init() {
   } catch (e) { saveErr(e); b = await createBoard('My Board'); }
   await openBoard(b.id);
   if (!db) toast('Drawings won’t be saved in this browser');
+  else store.kvGet('version').then(seen => {      // first open after an update: say so
+    if (seen !== VERSION) { if (seen) setTimeout(() => toast(`Updated to version ${VERSION}`), 600); store.kvSet('version', VERSION).catch(() => {}); }
+  }).catch(() => {});
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 }
