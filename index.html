@@ -41,7 +41,7 @@ svg{display:block}
 
 /* ---------- board ---------- */
 #board{position:absolute;inset:0;background:var(--canvas);overflow:hidden}
-#grid{position:absolute;inset:0;pointer-events:none}
+#grid{position:absolute;left:0;top:0;pointer-events:none;transform-origin:0 0;will-change:transform}
 canvas{position:absolute;left:0;top:0}
 #fills,#main{transform-origin:0 0;will-change:transform}
 #live{touch-action:none}
@@ -238,6 +238,8 @@ const boardEl = $('#board'), gridEl = $('#grid'), main = $('#main'), live = $('#
 const ctx = main.getContext('2d');
 const fctx = fillsEl.getContext('2d');          // fills live on their own layer, under the ink
 const lctx = live.getContext('2d', { desynchronized: true });
+const fillsB = document.createElement('canvas'), mainB = document.createElement('canvas');   // spare layers, never shown: see "moving the board"
+const fbx = fillsB.getContext('2d'), mbx = mainB.getContext('2d');
 const MINS = 0.25, MAXS = 4;                    // 25%–400%: hard to get lost
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -246,7 +248,9 @@ let W = 0, H = 0, DPR = 1;
 let v = { x: 0, y: 0, s: 1 };              // screen = world * s + (x,y)
 let board = null, strokes = [], nextSeq = 1;
 let undoStack = [], redoStack = [];
-let lastRenderMs = 0, gesturing = false, base = null, lastFull = 0;
+let lastRenderMs = 0, gesturing = false;
+let front = null;                           // the view the two visible layers were last drawn for (equal to v when they are sharp and in place)
+let job = null;                             // a redraw under way on the spare layers
 const pathCache = new WeakMap();
 
 /* ---------------- tools ---------------- */
@@ -641,33 +645,49 @@ function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 2);
   W = Math.round(innerWidth * DPR); H = Math.round(innerHeight * DPR);
   for (const c of [fillsEl, main, live]) { c.width = W; c.height = H; c.style.width = innerWidth + 'px'; c.style.height = innerHeight + 'px'; }
+  for (const c of [fillsB, mainB]) { c.width = W; c.height = H; }
   render(); updateGrid();
 }
-function render() {
-  const t0 = performance.now();
-  for (const c of [fctx, ctx]) {
+/* One pass over the drawing for the view q, onto a fills layer and an ink layer. A pass can stop part-way (once the
+   clock passes `until`) and carry on in the next frame, so a big drawing never holds up a moving finger. */
+function startPass(fc, mc, q) {
+  for (const c of [fc, mc]) {
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1;
     c.clearRect(0, 0, W, H);
-    setView(c);
+    c.setTransform(DPR * q.s, 0, 0, DPR * q.s, DPR * q.x, DPR * q.y);
   }
-  const x0 = -v.x / v.s, y0 = -v.y / v.s, x1 = x0 + innerWidth / v.s, y1 = y0 + innerHeight / v.s, tiny = 0.4 / v.s;
-  let anyFill = false, visible = 0;
-  for (const s of strokes) {
-    const b = s.bbox;
+  const x0 = -q.x / q.s, y0 = -q.y / q.s;
+  return { fc, mc, q, i: 0, anyFill: false, visible: 0, ms: 0, x0, y0, x1: x0 + innerWidth / q.s, y1: y0 + innerHeight / q.s, tiny: 0.4 / q.s };
+}
+function runPass(P, until) {
+  const { fc, mc, x0, y0, x1, y1, tiny } = P, n = strokes.length;
+  while (P.i < n) {
+    const s = strokes[P.i++], b = s.bbox;
     if (b[2] < x0 || b[0] > x1 || b[3] < y0 || b[1] > y1) continue;
-    if (s.tool !== 'eraser') visible++;
+    if (s.tool !== 'eraser') P.visible++;
     if (b[2] - b[0] < tiny && b[3] - b[1] < tiny) continue;
-    if (s.tool === 'fill') { drawStroke(fctx, s, getPath(s)); anyFill = true; continue; }
-    if (s.tool === 'eraser' && anyFill) drawStroke(fctx, s, getPath(s));   // erasers also rub out older fills
-    drawStroke(ctx, s, getPath(s));
+    if (s.tool === 'fill') { drawStroke(fc, s, getPath(s)); P.anyFill = true; }
+    else {
+      if (s.tool === 'eraser' && P.anyFill) drawStroke(fc, s, getPath(s));   // erasers also rub out older fills
+      drawStroke(mc, s, getPath(s));
+    }
+    if (until && performance.now() >= until) break;
   }
+  return P.i >= n;
+}
+/* the whole drawing, sharp, right now (blocks until done: used when the drawing itself changes) */
+function render() {
+  const t0 = performance.now();
+  const P = startPass(fctx, ctx, v);
+  runPass(P, 0);
   if (pen && pen.tool === 'eraser' && pen.mode === 'pixel' && pen.pts.length) {
     const p = buildPath(pen.stroke);
     drawStroke(ctx, pen.stroke, p); drawStroke(fctx, pen.stroke, p);
   }
   lastRenderMs = performance.now() - t0;
-  checkLost(visible);
+  job = null; front = { ...v }; unslide();
+  checkLost(P.visible);
 }
 
 /* "bring my drawing back": appears when the board has a drawing but none of it is on screen */
@@ -699,61 +719,119 @@ function drawLive() {
   }
   drawStroke(lctx, pen.stroke, buildPath(pen.stroke));
 }
-let gridMode = null;
+/* The grid is painted once for a zoom level on a layer a bit bigger than the screen; after that it is only slid and
+   stretched (no repainting) until the zoom has changed by a quarter or the fingers lift. */
+let gridMode = null, gridS = 0, gridW = 0, gridH = 0;
 function updateGrid() {
   const mode = prefs.grid;
   gridEl.hidden = !mode;
   if (!mode) return;
-  const dots = mode === 'dots';
-  if (gridMode !== mode) {
-    gridMode = mode;
-    gridEl.style.backgroundImage = dots
+  const dots = mode === 'dots', pitch = dots ? 32 : 40;
+  let k = v.s / gridS;
+  if (gridMode !== mode || gridW !== innerWidth || gridH !== innerHeight || !(k > 0.8 && k < 1.25) || (!gesturing && k !== 1)) {
+    gridMode = mode; gridS = v.s; gridW = innerWidth; gridH = innerHeight; k = 1;
+    const g0 = pitch * gridS, st = gridEl.style;
+    st.backgroundImage = dots
       ? 'radial-gradient(circle, var(--dot) 1.25px, transparent 1.75px)'
       : 'linear-gradient(to right,var(--gridline) 1px,transparent 1px),linear-gradient(to bottom,var(--gridline) 1px,transparent 1px)';
+    st.backgroundSize = `${g0}px ${g0}px`;
+    st.backgroundPosition = dots ? `${-g0 / 2}px ${-g0 / 2}px` : '0 0';
+    st.width = Math.ceil(innerWidth / 0.8 + g0) + 'px'; st.height = Math.ceil(innerHeight / 0.8 + g0) + 'px';
   }
-  const g = (dots ? 32 : 40) * v.s;
+  const g = pitch * v.s;
   gridEl.style.opacity = clamp((g - 6) / 16, 0.4, 1);
-  const ox = v.x % g, oy = v.y % g;
-  gridEl.style.backgroundSize = `${g}px ${g}px`;
-  gridEl.style.backgroundPosition = dots ? `${ox - g / 2}px ${oy - g / 2}px` : `${ox}px ${oy}px`;
+  let ox = (v.x % g + g) % g - g, oy = (v.y % g + g) % g - g;       // in (-g, 0]: the layer always covers the screen
+  if (!gesturing) { ox = Math.round(ox * DPR) / DPR; oy = Math.round(oy * DPR) / DPR; }   // at rest, sit on whole pixels (crisp)
+  gridEl.style.transform = `translate(${ox}px,${oy}px) scale(${k})`;
 }
 
-let needMain = false, needLive = false, raf = 0;
+let needMain = false, needView = false, needLive = false, raf = 0;
 const schedule = () => { if (!raf) raf = requestAnimationFrame(frame); };
-const requestRender = () => { needMain = true; schedule(); };
+const requestRender = () => { needMain = true; schedule(); };      // the drawing changed
+const requestView = () => { needView = true; schedule(); };        // only the view moved
 const requestLive = () => { needLive = true; schedule(); };
 function frame() {
   raf = 0;
-  if (needMain) {
-    needMain = false;
-    const now = performance.now();
-    if (gesturing && base && now - lastFull < clamp(lastRenderMs * 15, 140, 600)) slide();
-    else { render(); unslide(); if (gesturing) { base = { ...v }; lastFull = now; } }
+  if (needMain || needView) {
+    const moving = !needMain && gesturing && !pen && front;
+    needMain = needView = false;
+    if (moving) follow(); else render();
     updateGrid();
   }
+  if (job) stepJob();
   if (needLive) { needLive = false; drawLive(); }
 }
-/* while fingers move, the already-drawn layers are just moved/scaled (smooth, no re-drawing);
-   a sharp re-draw happens a few times a second and when the fingers lift */
+
+/* ---------------- moving the board ----------------
+   While fingers move the board, the picture already on screen is only slid and stretched (the GPU does that, so it
+   never waits for the drawing). Fresh pictures are drawn in the background on spare layers, a few milliseconds per
+   frame, and swapped in when ready. Each covers more than the screen (so the edges don't run dry) at the price of
+   being a little soft; full sharpness comes back the moment the board rests or the fingers lift. */
+const ROOM = 1.5;                      // a background picture covers this many screens across
+const SLICE_MOVING = 7, SLICE_RESTING = 10;   // ms of drawing per frame
+let restT = 0;
+const same = (a, b) => !!a && Math.abs(a.s - b.s) < 1e-9 && Math.abs(a.x - b.x) < 1e-6 && Math.abs(a.y - b.y) < 1e-6;
 function slide() {
-  const k = v.s / base.s, t = `translate(${v.x - base.x * k}px,${v.y - base.y * k}px) scale(${k})`;
+  if (same(front, v)) { unslide(); return; }
+  const k = v.s / front.s, t = `translate(${v.x - front.x * k}px,${v.y - front.y * k}px) scale(${k})`;
   fillsEl.style.transform = t; main.style.transform = t;
 }
 function unslide() { fillsEl.style.transform = ''; main.style.transform = ''; }
-function beginGesture() {
-  if (gesturing) return;
-  gesturing = true; base = { ...v }; lastFull = performance.now();
+function roomy() {                     // the current view, zoomed out about the middle of the screen
+  const cx = innerWidth / 2, cy = innerHeight / 2;
+  return { s: v.s / ROOM, x: cx - (cx - v.x) / ROOM, y: cy - (cy - v.y) / ROOM };
 }
+function stale() {                     // is the moving picture stretched too far, or about to show a bare edge?
+  const k = v.s / front.s, x = v.x - front.x * k, y = v.y - front.y * k, mx = innerWidth * 0.06, my = innerHeight * 0.06;
+  return k > 2 || x > -mx || y > -my || x + innerWidth * k < innerWidth + mx || y + innerHeight * k < innerHeight + my;
+}
+function startJob(q) { job = startPass(fbx, mbx, q); job.from = { ...v }; schedule(); }
+function follow() {
+  slide();
+  if (!job && stale()) startJob(roomy());
+  clearTimeout(restT); restT = setTimeout(sharpen, 150);
+}
+function stepJob() {
+  const J = job, t0 = performance.now();
+  const done = runPass(J, t0 + (gesturing ? SLICE_MOVING : SLICE_RESTING));
+  J.ms += performance.now() - t0;
+  if (!done) { schedule(); return; }
+  job = null; lastRenderMs = J.ms;
+  for (const [to, from] of [[fctx, fillsB], [ctx, mainB]]) {      // swap the finished picture in
+    to.setTransform(1, 0, 0, 1, 0, 0); to.globalCompositeOperation = 'source-over'; to.globalAlpha = 1;
+    to.clearRect(0, 0, W, H); to.drawImage(from, 0, 0);
+  }
+  front = J.q;
+  slide();
+  if (same(front, v)) { if (!gesturing) checkLost(J.visible); }
+  else if (!gesturing) sharpen();
+  else if (!same(J.from, v) && stale()) startJob(roomy());        // the board moved on while this one was being drawn
+}
+function sharpen() {                   // the board has come to rest: bring full sharpness back, still without blocking
+  clearTimeout(restT);
+  if (pen || !front) return;
+  if (same(front, v)) { job = null; return; }
+  if (job && same(job.q, v)) return;
+  startJob({ ...v });
+}
+/* before anything is drawn straight onto the visible layers, they must be sharp and in place */
+function settle() { clearTimeout(restT); if (job || !same(front, v)) render(); }
+function beginGesture() { gesturing = true; }
 function endGesture() {
   if (!gesturing) return;
-  gesturing = false; base = null;
-  render(); unslide(); updateGrid();      // sharp again right away (the Pencil may already be down)
+  gesturing = false; needView = false;
+  clearTimeout(restT);
+  if (same(front, v)) job = null;
+  else if (lastRenderMs < 8) render();    // a light drawing: sharp at once
+  else sharpen();
+  updateGrid();
   saveMetaSoon();
 }
 
 /* ---------------- drawing input ---------------- */
 let pen = null;
 function startStroke(e, type) {
+  settle();
   const name = prefs.tool, st = prefs.t[name], T = TOOLS[name];
   pen = { id: e.pointerId, type, tool: name, mode: name === 'eraser' ? st.mode : null, pts: [], removed: [], lastP: null, cx: e.clientX, cy: e.clientY, sx: e.clientX, sy: e.clientY, t0: performance.now() };
   pen.stroke = { tool: name === 'fill' ? 'paint' : name, color: st.color || '#000000', width: T.widths[st.wi] / v.s, opacity: st.op ?? 1, pts: pen.pts };
@@ -888,7 +966,7 @@ function spill(out) {                       // show the paint leaking out, then 
 }
 function doFill(cx, cy, soft = false) {   // soft: just report failure (the tap becomes a dot instead)
   const st = prefs.t.fill;
-  hideFind();
+  hideFind(); settle();
   maskC.width = W; maskC.height = H;
   const g = maskC.getContext('2d', { willReadFrequently: true });
   const k = DPR * v.s;
@@ -1026,11 +1104,12 @@ function applyTouches() {
   const zoomed = Math.abs(s - v.s) > 1e-6;
   v.s = s; v.x = cx - g.wx * s; v.y = cy - g.wy * s;
   if (zoomed) showZoom();
-  requestRender();
+  requestView();
 }
 function onDown(e) {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   e.preventDefault();
+  stopGlide();
   if (e.pointerType !== 'touch') {                 // Apple Pencil (or mouse)
     if (pen) {                                     // "Draw with Finger" is on and a hand got there first:
       if (pen.type !== 'touch' || e.pointerType !== 'pen') return;
@@ -1095,16 +1174,17 @@ document.addEventListener('dblclick', e => e.preventDefault());
 let wheelTimer = 0;
 live.addEventListener('wheel', e => {
   e.preventDefault();
+  stopGlide();
   beginGesture();
   if (e.ctrlKey || e.metaKey) zoomAt(e.clientX, e.clientY, v.s * Math.exp(-e.deltaY * 0.01));
-  else { v.x -= e.deltaX; v.y -= e.deltaY; requestRender(); }
+  else { v.x -= e.deltaX; v.y -= e.deltaY; requestView(); }
   clearTimeout(wheelTimer); wheelTimer = setTimeout(endGesture, 160);
 }, { passive: false });
 function zoomAt(cx, cy, s) {
   s = clamp(s, MINS, MAXS);
   const wx = (cx - v.x) / v.s, wy = (cy - v.y) / v.s;
   v.s = s; v.x = cx - wx * s; v.y = cy - wy * s;
-  showZoom(); requestRender();
+  showZoom(); requestView();
 }
 
 /* ---------------- view helpers ---------------- */
@@ -1125,16 +1205,20 @@ function zoomToFit() {
   const s = clamp(Math.min(aw / (b[2] - b[0]), ah / (b[3] - b[1])), MINS, 2);
   animateTo({ s, x: side + (aw - (b[2] - b[0]) * s) / 2 - b[0] * s, y: top + (ah - (b[3] - b[1]) * s) / 2 - b[1] * s });
 }
+let glide = 0, glideN = 0;
+function stopGlide() { if (glide) { glide = 0; endGesture(); } }
 function animateTo(t) {                       // smooth glide so he can see where the drawing is
-  hideFind();
+  hideFind(); stopGlide();
+  const id = glide = ++glideN;
+  beginGesture();                             // glides like a finger would: slide the picture, redraw in the background
   const f = { ...v }, t0 = performance.now(), dur = 450, hw = innerWidth / 2, hh = innerHeight / 2;
   const fc = [(hw - f.x) / f.s, (hh - f.y) / f.s], tc = [(hw - t.x) / t.s, (hh - t.y) / t.s];
   const step = now => {
+    if (glide !== id) return;
     const q = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - q, 3);
     const s = f.s * Math.pow(t.s / f.s, e), cx = fc[0] + (tc[0] - fc[0]) * e, cy = fc[1] + (tc[1] - fc[1]) * e;
-    v = { s, x: hw - cx * s, y: hh - cy * s };
-    render(); updateGrid();
-    if (q < 1) requestAnimationFrame(step); else { v = { ...t }; render(); updateGrid(); showZoom(); saveMetaSoon(); }
+    if (q < 1) { v = { s, x: hw - cx * s, y: hh - cy * s }; requestView(); requestAnimationFrame(step); }
+    else { v = { ...t }; glide = 0; endGesture(); showZoom(); }
   };
   requestAnimationFrame(step);
 }
@@ -1597,7 +1681,8 @@ async function init() {
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-window.__ef = { get v() { return v; }, get strokes() { return strokes; }, get prefs() { return prefs; }, get lastRenderMs() { return lastRenderMs; } };
+window.__ef = { get v() { return v; }, get strokes() { return strokes; }, get prefs() { return prefs; }, get lastRenderMs() { return lastRenderMs; },
+  get moving() { return { gesturing, job: !!job, inPlace: same(front, v), front: front && { ...front } }; } };
 init();
 })();
 </script>
