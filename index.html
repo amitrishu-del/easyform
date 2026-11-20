@@ -272,7 +272,7 @@ const TOOLS = {
 };
 const ORDER = ['pen', 'monoline', 'fountain', 'marker', 'pencil', 'crayon', 'glitter', 'rainbow', 'fill', 'eraser'];   // stamps hidden for now (old ones still show)
 const STAMPS = ['⭐️', '❤️', '🌈', '☀️', '🌙', '☁️', '🌸', '🌻', '🌳', '🍎', '🍓', '🎈', '🐶', '🐱', '🐰', '🦄', '🐻', '🐟', '🦋', '🐞', '🦖', '🚗', '🚀', '🏠'];
-const VERSION = 9, VERSION_DATE = '17 Nov 2026';   // shown in the ••• menu; bump with CACHE in sw.js
+const VERSION = 10, VERSION_DATE = '17 Nov 2026';   // shown in the ••• menu; bump with CACHE in sw.js
 let prefs = {
   tool: 'pen', lastDraw: 'pen', grid: 'dots', finger: false, theme: 'auto', pv: 3,
   t: {
@@ -1499,7 +1499,17 @@ let metaTimer = 0, thumbTimer = 0;
 function touchBoard() {
   if (!board) return;
   board.updated = Date.now(); saveMetaSoon();
-  clearTimeout(thumbTimer); thumbTimer = setTimeout(() => { if (!pen && !gesturing) saveMeta(true); }, 4000);
+  clearTimeout(thumbTimer); thumbTimer = setTimeout(thumbWhenIdle, THUMB_IDLE);
+}
+/* the gallery preview redraws the whole board twice, which freezes the screen on a big board,
+   so it is made when leaving the board or the app, or after a long rest with no touches at all */
+const THUMB_IDLE = 45000;
+let lastInput = 0;
+for (const t of ['pointerdown', 'pointermove', 'wheel']) addEventListener(t, () => { lastInput = performance.now(); }, { capture: true, passive: true });
+function thumbWhenIdle() {
+  const quiet = performance.now() - lastInput;
+  if (pen || gesturing || quiet < THUMB_IDLE) { clearTimeout(thumbTimer); thumbTimer = setTimeout(thumbWhenIdle, Math.max(1000, THUMB_IDLE - quiet)); return; }
+  saveMeta(true);
 }
 function saveMetaSoon() { clearTimeout(metaTimer); metaTimer = setTimeout(() => saveMeta(false), 600); }
 async function saveMeta(withThumb) {
